@@ -1,0 +1,22 @@
+[package]
+name = "beaver-gba"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+agb = "0.25.0"
+beaver-sim = { path = "../sim" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[profile.dev]
+opt-level = 3
+debug = true
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

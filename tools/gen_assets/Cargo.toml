@@ -1,0 +1,9 @@
+[package]
+name = "gen-assets"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hound = "3.5"
+png = "0.17"
