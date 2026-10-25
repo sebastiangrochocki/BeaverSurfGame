@@ -1,0 +1,15 @@
+Beaver Surf
+Copyright (c) 2026 Sebastian Grochocki
+
+All rights reserved.
+
+This license covers the Beaver Surf game in this repository: its source code, artwork, sound, and ROMs.
+
+The copyright holder keeps every right, including the right to sell or license the game. No permission is granted to use, copy, modify, merge, publish, distribute, sublicense, or sell the game, in source or binary form, without prior written permission from the copyright holder.
+
+Viewing this public repository does not grant any of those rights.
+
+Exceptions:
+
+- The sprite editor in web/editor/ is under the MIT License. See web/editor/LICENSE.
+- Third-party libraries used to build the game stay under their own licenses. This file does not relicense them.

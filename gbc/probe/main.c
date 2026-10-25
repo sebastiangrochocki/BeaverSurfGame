@@ -8,7 +8,7 @@
 #include "../src/rules.h"
 
 Events events;
-uint16_t probe_idle, probe_jump, probe_tables, probe_calib, probe_done;
+uint16_t probe_idle, probe_jump, probe_lane, probe_tables, probe_calib, probe_done;
 volatile uint16_t sink;
 
 static uint16_t time_steps(uint8_t jumping) {
@@ -19,6 +19,23 @@ static uint16_t time_steps(uint8_t jumping) {
     for (i = 0; i < 120; i++) {
         uint8_t input = INPUT_RIGHT;
         if (jumping && !world.beaver.airborne && (i & 7) == 0) input |= INPUT_JUMP;
+        world_step(input, &events);
+    }
+    t1 = sys_time;
+    return (uint16_t)(t1 - t0);
+}
+
+/* Double Down, then a jump and a second jump: a hop between lanes and a lane jump. */
+static uint16_t time_lanes(void) {
+    uint16_t t0, t1;
+    uint8_t i;
+    wait_vbl_done();
+    t0 = sys_time;
+    for (i = 0; i < 120; i++) {
+        uint8_t input = INPUT_RIGHT;
+        uint8_t phase = (uint8_t)(i % 30);
+        if (phase == 0 || phase == 2) input |= INPUT_DIVE;
+        if (phase == 12 || phase == 18) input |= INPUT_JUMP;
         world_step(input, &events);
     }
     t1 = sys_time;
@@ -63,10 +80,12 @@ void main(void) {
     world_step(INPUT_START, &events);
     probe_idle = time_steps(0);
     probe_jump = time_steps(1);
+    probe_lane = time_lanes();
     probe_tables = time_tables();
     probe_done = 1;
     printf("120 steps idle %u\n", probe_idle);
     printf("120 steps jump %u\n", probe_jump);
+    printf("120 steps lane %u\n", probe_lane);
     printf("120 refresh    %u\n", probe_tables);
     printf("\nframes per step\nx100: %u / %u\n", (uint16_t)(probe_idle * 100 / 120),
            (uint16_t)(probe_jump * 100 / 120));

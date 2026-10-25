@@ -16,7 +16,7 @@ use agb::{
     sound::mixer::{Frequency, SoundChannel, SoundData},
 };
 use beaver_sim::{Input, Phase, World, decode_save, encode_save};
-use render::{Layers, draw_actors, install_palettes};
+use render::{Layers, draw_actors, draw_pause, install_palettes};
 use serde::{Deserialize, Serialize};
 
 const ROM_MAGIC: [u8; 32] = *b"BEAVERSURF_GBA_SRAM_V1__________";
@@ -50,9 +50,27 @@ fn main(mut gba: agb::Gba) -> ! {
     let mut music = music::Music::start();
     let mut buttons = ButtonController::new();
     let mut best_before_run = world.best;
+    // Start during play freezes the world and the song; the rules never see those frames.
+    let mut paused = false;
+    let mut pause_frames: u32 = 0;
 
     loop {
         buttons.update();
+        if world.phase == Phase::Play && buttons.is_just_pressed(Button::Start) {
+            paused = !paused;
+            pause_frames = 0;
+        }
+        if paused {
+            pause_frames = pause_frames.wrapping_add(1);
+            layers.scroll(&world);
+            let mut frame = gfx.frame();
+            layers.show(&mut frame);
+            draw_actors(&mut frame, &world, false);
+            draw_pause(&mut frame, pause_frames);
+            mixer.frame();
+            frame.commit();
+            continue;
+        }
         let input = Input {
             left: buttons.is_pressed(Button::Left),
             right: buttons.is_pressed(Button::Right),

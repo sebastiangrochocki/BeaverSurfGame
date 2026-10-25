@@ -16,8 +16,8 @@ mod wave;
 
 pub use save::{decode_save, encode_save};
 pub use wave::{
-    FRONT_HORIZON, HORIZON, SLOPE_MAX, Sea, TABLE_LEN, TABLE_SLICE, WAVE_PERIOD_PX, amplitude_half,
-    envelope_cell, front_height, steer_scale, table_entry, tier,
+    FRONT_HORIZON, FRONT_PHASE, HORIZON, LANE_BOTTOM, LANE_TOP, SLOPE_MAX, Sea, TABLE_LEN,
+    TABLE_SLICE, WAVE_PERIOD_PX, amplitude_half, envelope_cell, steer_scale, table_entry, tier,
 };
 
 /// One pixel in position units (Q10.6).
@@ -50,8 +50,14 @@ pub const DIVE_GRAVITY: i16 = 154;
 pub const JUMP_VY: i16 = -(VEL * 4);
 pub const EARLY_JUMP_VY: i16 = -(VEL * 2);
 /// Extra lift when right is held at take-off.
-const RIGHT_TUG_VY: i16 = VEL / 2;
+const RIGHT_TUG_VY: i16 = 3 * VEL / 4;
 const MAX_JUMP_VY: i16 = -(VEL * 7);
+/// Two presses inside this many frames count as a double tap.
+pub const DOUBLE_TAP: u8 = 12;
+/// Short hop that carries the beaver off the top lane toward the bottom one.
+pub const HOP_VY: i16 = -VEL;
+/// Air drop onto the bottom lane is only accepted this close above the top surface.
+pub const DROP_WINDOW: i16 = 10 * FP;
 
 /// Jump-timing bar: 0 is the foot of the climb, the green zone is the top-fifth jump window,
 /// and past it the crest has gone by.
@@ -201,6 +207,12 @@ pub struct Beaver {
     pub air_time: u16,
     /// Rings passed through since take-off.
     pub rings: u8,
+    /// 0 is the top wave, 1 is the bottom wave.
+    pub lane: u8,
+    /// Lane the beaver is travelling toward during a hop or a lane jump.
+    pub lane_to: u8,
+    /// Feet rose above the top surface during a lane jump.
+    pub cleared: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +243,11 @@ pub struct World {
     /// Ticks until a zig-zagging gull reverses; 0 for gulls that fly straight or glide.
     pub gull_turn: [u8; GULL_SLOTS],
     pub rings: [Option<Actor>; RING_SLOTS],
+    /// Lane each ring slot rides. Meaningful while that slot is occupied.
+    pub ring_lane: [u8; RING_SLOTS],
     pub heart_pickup: Option<Actor>,
+    /// Lane the heart rides.
+    pub heart_lane: u8,
     pub ring_count: u16,
     pub splash: Option<Splash>,
     pub combo: u8,
@@ -256,6 +272,11 @@ pub struct World {
     pub sea: Sea,
     start_held: bool,
     jump_held: bool,
+    dive_held: bool,
+    /// Frames left in which another Down press is a double tap.
+    down_tap: u8,
+    /// Frames left in which another Up press is a double tap.
+    up_tap: u8,
 }
 
 impl World {
@@ -275,12 +296,17 @@ impl World {
                 perfect: false,
                 air_time: 0,
                 rings: 0,
+                lane: LANE_TOP,
+                lane_to: LANE_TOP,
+                cleared: false,
             },
             gulls: [None; GULL_SLOTS],
             gull_vy: [0; GULL_SLOTS],
             gull_turn: [0; GULL_SLOTS],
             rings: [None; RING_SLOTS],
+            ring_lane: [LANE_TOP; RING_SLOTS],
             heart_pickup: None,
+            heart_lane: LANE_TOP,
             ring_count: 0,
             splash: None,
             combo: 0,
@@ -300,6 +326,9 @@ impl World {
             sea: Sea::new(0, 0),
             start_held: false,
             jump_held: false,
+            dive_held: false,
+            down_tap: 0,
+            up_tap: 0,
         };
         world.beaver.y = world.sea.at(world.beaver_world_x());
         world
@@ -360,6 +389,19 @@ impl World {
         }
         let jump_edge = input.jump && !self.jump_held;
         self.jump_held = input.jump;
+        let dive_edge = input.dive && !self.dive_held;
+        self.dive_held = input.dive;
+        let double_down = dive_edge && self.down_tap > 0;
+        if dive_edge {
+            self.down_tap = DOUBLE_TAP;
+        } else if self.down_tap > 0 {
+            self.down_tap -= 1;
+        }
+        if jump_edge {
+            self.up_tap = DOUBLE_TAP;
+        } else if self.up_tap > 0 {
+            self.up_tap -= 1;
+        }
         if self.banner_timer > 0 {
             self.banner_timer -= 1;
             if self.banner_timer == 0 {
@@ -374,12 +416,19 @@ impl World {
         self.steer(if stunned { Input::default() } else { input });
 
         let world_x = self.beaver_world_x();
-        let surface = self.sea.at(world_x);
-        let face = self.sea.slope(world_x);
+        let lane = self.beaver.lane;
+        let surface = self.sea.surface(world_x, lane);
+        let face = self.sea.lane_slope(world_x, lane);
+        let top = self.sea.at(world_x);
 
         if self.beaver.airborne {
-            if jump_edge && self.beaver.flip == 0 {
-                self.beaver.flip = FLIP_FRAMES;
+            if jump_edge && self.beaver.flip == 0 && self.beaver.lane == self.beaver.lane_to {
+                if self.beaver.lane == LANE_BOTTOM {
+                    self.beaver.lane_to = LANE_TOP;
+                    self.beaver.cleared = false;
+                } else {
+                    self.beaver.flip = FLIP_FRAMES;
+                }
             }
             if self.beaver.flip > 0 {
                 self.beaver.flip -= 1;
@@ -388,20 +437,54 @@ impl World {
                 }
             }
             self.beaver.air_time = self.beaver.air_time.saturating_add(1);
-            self.beaver.vy += if input.dive { DIVE_GRAVITY } else { GRAVITY };
+            let between = self.beaver.lane != self.beaver.lane_to;
+            self.beaver.vy += if input.dive && !between {
+                DIVE_GRAVITY
+            } else {
+                GRAVITY
+            };
             self.beaver.y += self.beaver.vy >> 2;
-            if self.beaver.y >= surface && self.beaver.vy > 0 {
-                self.beaver.y = surface;
-                self.beaver.vy = 0;
-                self.beaver.airborne = false;
-                self.land(face, &mut events);
+            let climbing = self.beaver.lane == LANE_BOTTOM && self.beaver.lane_to == LANE_TOP;
+            if double_down
+                && self.beaver.lane == LANE_TOP
+                && self.beaver.lane_to == LANE_TOP
+                && self.beaver.vy > 0
+            {
+                let gap = top - self.beaver.y;
+                if gap >= 0 && gap < DROP_WINDOW {
+                    self.beaver.lane_to = LANE_BOTTOM;
+                }
+            }
+            let dropping = self.beaver.lane == LANE_TOP && self.beaver.lane_to == LANE_BOTTOM;
+            let bottom = self.sea.front_at(world_x);
+            if climbing && self.beaver.y < top {
+                self.beaver.cleared = true;
+            }
+            if climbing && self.beaver.cleared && self.beaver.y >= top && self.beaver.vy > 0 {
+                self.settle(top, LANE_TOP);
+                self.land(self.sea.slope(world_x), &mut events, false);
+            } else if dropping && self.beaver.y >= bottom && self.beaver.vy > 0 {
+                self.settle(bottom, LANE_BOTTOM);
+                self.land(self.sea.front_slope(world_x), &mut events, false);
+            } else if climbing
+                && !self.beaver.cleared
+                && self.beaver.y >= bottom
+                && self.beaver.vy > 0
+            {
+                self.settle(bottom, LANE_BOTTOM);
+                self.land(self.sea.front_slope(world_x), &mut events, true);
+            } else if !dropping && !climbing && self.beaver.y >= surface && self.beaver.vy > 0 {
+                self.settle(surface, lane);
+                self.land(face, &mut events, false);
             }
         } else {
             self.beaver.y = surface;
             self.beaver.vy = 0;
             self.ride(face, input);
-            self.glide_meter(self.sea.jump_meter(world_x));
-            if input.jump && !stunned && self.sea.jump_allowed(world_x) {
+            self.glide_meter(self.sea.lane_jump_meter(world_x, lane));
+            if !stunned && double_down && self.beaver.lane == LANE_TOP {
+                self.hop_down();
+            } else if input.jump && !stunned && self.sea.lane_jump_allowed(world_x, lane) {
                 self.launch(world_x, input);
                 events.jumped = true;
             }
@@ -412,7 +495,9 @@ impl World {
         self.move_actors(scroll_step);
         if self.invuln > 0 {
             self.invuln -= 1;
-        } else if self.phase == Phase::Play && self.touching_gull() {
+        } else if self.phase == Phase::Play
+            && self.touching_gull(input.dive && self.beaver.flip == 0 && !double_down)
+        {
             events.hit = true;
             self.lose_half_heart(&mut events);
         }
@@ -425,6 +510,7 @@ impl World {
         }
         if self.touching_heart() {
             self.heart_pickup = None;
+            self.heart_lane = LANE_TOP;
             self.hearts = (self.hearts + 1).min(START_HEARTS);
             self.show(Banner::Heart);
             events.heart = true;
@@ -472,7 +558,7 @@ impl World {
             let scale = if self.beaver.airborne {
                 160
             } else {
-                steer_scale(self.sea.slope(self.beaver_world_x()))
+                steer_scale(self.sea.lane_slope(self.beaver_world_x(), self.beaver.lane))
             };
             // Building speed is gradual and slope-dependent; braking into a reversal is not.
             let accel = if self.beaver.vx * dir < 0 {
@@ -492,8 +578,10 @@ impl World {
     /// Downhill water adds surf speed and uphill water takes it away.
     fn ride(&mut self, face: i16, input: Input) {
         let mut accel = (face / 10).clamp(-SLOPE_ACCEL_MAX, SLOPE_ACCEL_MAX);
+        // Driving right up a face keeps half the speed the climb would take, so pumped
+        // speed still shows at the crest.
         if face < 0 && input.right {
-            accel = accel * 3 / 4;
+            accel /= 2;
         }
         if face > 0 && (input.right || input.dive) {
             accel += PUMP_ACCEL;
@@ -507,18 +595,21 @@ impl World {
         }
     }
 
-    /// Take-off height grows with surf speed, so speed from the last ramp carries into the next.
+    /// Take-off height grows with surf speed, so speed from the last ramp carries into the next:
+    /// every pixel per frame over cruising adds three quarters of itself to the take-off.
     fn launch(&mut self, world_x: i32, input: Input) {
         let excess = (self.speed - SCROLL_SPEED).max(0);
         let tug = if input.right { RIGHT_TUG_VY } else { 0 };
-        self.beaver.perfect = self.sea.in_top_fifth(world_x);
+        self.beaver.perfect = self.sea.lane_in_top_fifth(world_x, self.beaver.lane);
+        self.beaver.lane_to = self.beaver.lane;
+        self.beaver.cleared = false;
         self.beaver.air_time = 0;
         self.beaver.rings = 0;
         if self.beaver.perfect {
-            self.beaver.vy = JUMP_VY - excess * 3 / 8 - tug;
+            self.beaver.vy = JUMP_VY - excess * 3 / 4 - tug;
             self.speed += VEL / 2;
         } else {
-            self.beaver.vy = EARLY_JUMP_VY - excess / 8 - tug / 4;
+            self.beaver.vy = EARLY_JUMP_VY - excess / 4 - tug / 2;
             self.speed = self.speed * 3 / 4;
         }
         self.beaver.vy = self.beaver.vy.max(MAX_JUMP_VY);
@@ -526,11 +617,35 @@ impl World {
         self.beaver.y += self.beaver.vy >> 2;
     }
 
+    /// Leaves the top lane for the bottom one with a short hop.
+    fn hop_down(&mut self) {
+        self.beaver.lane_to = LANE_BOTTOM;
+        self.beaver.cleared = false;
+        self.beaver.flip = 0;
+        self.beaver.flips = 0;
+        self.beaver.perfect = false;
+        self.beaver.air_time = 0;
+        self.beaver.rings = 0;
+        self.beaver.vy = HOP_VY;
+        self.beaver.airborne = true;
+        self.beaver.y += self.beaver.vy >> 2;
+    }
+
+    fn settle(&mut self, surface: i16, lane: u8) {
+        self.beaver.y = surface;
+        self.beaver.vy = 0;
+        self.beaver.airborne = false;
+        self.beaver.lane = lane;
+        self.beaver.lane_to = lane;
+        self.beaver.cleared = false;
+    }
+
     /// Landing on a downhill face is a clean landing: a speed kick and a growing combo.
-    fn land(&mut self, face: i16, events: &mut Events) {
+    /// `failed` is a lane jump that never cleared the top wave: the same wipeout as a mid-flip.
+    fn land(&mut self, face: i16, events: &mut Events, failed: bool) {
         events.landed = true;
         let flips = self.beaver.flips;
-        let mid_flip = self.beaver.flip > 0;
+        let mid_flip = self.beaver.flip > 0 || failed;
         self.beaver.flip = 0;
         self.beaver.flips = 0;
         if mid_flip {
@@ -636,13 +751,14 @@ impl World {
                 }
             }
         }
-        for slot in &mut self.rings {
+        for (slot, lane) in self.rings.iter_mut().zip(self.ring_lane.iter_mut()) {
             if let Some(ring) = slot {
                 ring.x -= scroll_step;
                 if ring.x < px(-24) {
                     *slot = None;
+                    *lane = LANE_TOP;
                 } else {
-                    ring.y = self.sea.at(self.scroll + ring.x as i32) - RING_LIFT;
+                    ring.y = self.sea.surface(self.scroll + ring.x as i32, *lane) - RING_LIFT;
                 }
             }
         }
@@ -650,8 +766,12 @@ impl World {
             heart.x -= scroll_step;
             if heart.x < px(-24) {
                 self.heart_pickup = None;
+                self.heart_lane = LANE_TOP;
             } else {
-                heart.y = self.sea.at(self.scroll + heart.x as i32) - RING_LIFT;
+                heart.y = self
+                    .sea
+                    .surface(self.scroll + heart.x as i32, self.heart_lane)
+                    - RING_LIFT;
             }
         }
 
@@ -673,20 +793,19 @@ impl World {
         if self.ring_timer == 0 {
             self.ring_timer = ring_interval(tier);
             self.ring_count = self.ring_count.wrapping_add(1);
+            let lane = (self.roll() & 1) as u8;
             let x = px(SCREEN_W + 24);
-            spawn(
-                &mut self.rings,
-                Actor {
-                    x,
-                    y: self.sea.at(self.scroll + x as i32) - RING_LIFT,
-                },
-            );
+            let y = self.sea.surface(self.scroll + x as i32, lane) - RING_LIFT;
+            if let Some(index) = spawn(&mut self.rings, Actor { x, y }) {
+                self.ring_lane[index] = lane;
+            }
             let hurt = self.hearts < START_HEARTS;
             if hurt && self.ring_count % HEART_EVERY_RINGS == 0 && self.heart_pickup.is_none() {
                 let x = x + HEART_GAP;
+                self.heart_lane = lane;
                 self.heart_pickup = Some(Actor {
                     x,
-                    y: self.sea.at(self.scroll + x as i32) - RING_LIFT,
+                    y: self.sea.surface(self.scroll + x as i32, lane) - RING_LIFT,
                 });
             }
         }
@@ -703,8 +822,8 @@ impl World {
         }
     }
 
-    fn touching_gull(&self) -> bool {
-        let beaver = beaver_box(self.beaver);
+    fn touching_gull(&self, tucked: bool) -> bool {
+        let beaver = beaver_box(self.beaver, tucked);
         self.gulls
             .iter()
             .flatten()
@@ -716,7 +835,7 @@ impl World {
             return false;
         };
         overlap(
-            beaver_box(self.beaver),
+            beaver_box(self.beaver, false),
             Rect {
                 x: heart.x - px(8),
                 y: heart.y - px(8),
@@ -734,11 +853,12 @@ impl World {
         let cx = self.beaver.x;
         let cy = self.beaver.y - px(14);
         let mut scored = false;
-        for slot in &mut self.rings {
+        for (slot, lane) in self.rings.iter_mut().zip(self.ring_lane.iter_mut()) {
             if let Some(ring) = *slot {
                 let inside = (cx - ring.x).abs() <= px(10) && (cy - ring.y).abs() <= px(10);
                 if inside {
                     *slot = None;
+                    *lane = LANE_TOP;
                     scored = true;
                 }
             }
@@ -799,18 +919,21 @@ fn ring_interval(tier: u8) -> u16 {
     220u16.saturating_sub(tier as u16 * 10).max(120)
 }
 
-fn spawn<const N: usize>(slots: &mut [Option<Actor>; N], actor: Actor) {
-    if let Some(slot) = slots.iter_mut().find(|slot| slot.is_none()) {
-        *slot = Some(actor);
-    }
+fn spawn<const N: usize>(slots: &mut [Option<Actor>; N], actor: Actor) -> Option<usize> {
+    let index = slots.iter().position(|slot| slot.is_none())?;
+    slots[index] = Some(actor);
+    Some(index)
 }
 
-fn beaver_box(beaver: Beaver) -> Rect {
+fn beaver_box(beaver: Beaver, tucked: bool) -> Rect {
+    // The crouch drops the head eight pixels. A gull on the standing head misses; one that
+    // still crosses the low body does not.
+    let (top, height) = if tucked { (16, 12) } else { (24, 20) };
     Rect {
         x: beaver.x - px(8),
-        y: beaver.y - px(24),
+        y: beaver.y - px(top),
         w: px(16),
-        h: px(20),
+        h: px(height),
     }
 }
 
@@ -1511,9 +1634,333 @@ mod tests {
     }
 
     #[test]
+    fn crouching_lets_a_gull_clear_the_head() {
+        let beaver = Beaver {
+            x: px(80),
+            y: px(100),
+            vx: 0,
+            vy: 0,
+            airborne: false,
+            flip: 0,
+            flips: 0,
+            perfect: false,
+            air_time: 0,
+            rings: 0,
+            lane: LANE_TOP,
+            lane_to: LANE_TOP,
+            cleared: false,
+        };
+        let standing = beaver_box(beaver, false);
+        let crouched = beaver_box(beaver, true);
+        let on_the_head = Rect {
+            x: beaver.x - px(2),
+            y: standing.y,
+            w: px(8),
+            h: px(6),
+        };
+        assert!(overlap(standing, on_the_head));
+        assert!(!overlap(crouched, on_the_head));
+        assert!(overlap(
+            crouched,
+            Rect {
+                x: beaver.x - px(2),
+                y: crouched.y,
+                w: px(8),
+                h: px(6),
+            }
+        ));
+    }
+
+    #[test]
     fn input_bits_round_trip() {
         for bits in 0..32u8 {
             assert_eq!(Input::from_bits(bits).to_bits(), bits);
         }
+    }
+
+    fn place_lane(world: &mut World, world_x: i32, tick_after: u32, lane: u8) {
+        place(world, world_x, tick_after);
+        world.beaver.lane = lane;
+        world.beaver.lane_to = lane;
+        world.beaver.y = world.sea.surface(world_x, lane);
+    }
+
+    /// Two Down presses a frame apart.
+    fn double_down(world: &mut World) -> Events {
+        world.step(Input {
+            dive: true,
+            ..Input::default()
+        });
+        world.step(Input::default());
+        world.step(Input {
+            dive: true,
+            ..Input::default()
+        })
+    }
+
+    fn coast_until_landed(world: &mut World) -> Events {
+        let mut last = Events::default();
+        for _ in 0..200 {
+            if !world.beaver.airborne {
+                break;
+            }
+            last = world.step(Input::default());
+        }
+        last
+    }
+
+    #[test]
+    fn double_down_on_the_water_drops_to_the_bottom_lane_and_one_down_only_tucks() {
+        let mut tucked = run();
+        place(&mut tucked, px(40) as i32, 6);
+        tucked.step(Input {
+            dive: true,
+            ..Input::default()
+        });
+        assert_eq!(tucked.beaver.lane, LANE_TOP);
+        assert!(!tucked.beaver.airborne);
+        assert_eq!(tucked.beaver.y, tucked.sea.at(tucked.beaver_world_x()));
+
+        let mut world = run();
+        place(&mut world, px(40) as i32, 6);
+        double_down(&mut world);
+        assert!(world.beaver.airborne);
+        assert_eq!(world.beaver.lane, LANE_TOP);
+        assert_eq!(world.beaver.lane_to, LANE_BOTTOM);
+        let landed = coast_until_landed(&mut world);
+        assert!(landed.landed);
+        assert!(!landed.wipeout);
+        assert!(!world.beaver.airborne);
+        assert_eq!(world.beaver.lane, LANE_BOTTOM);
+        assert_eq!(world.beaver.y, world.sea.front_at(world.beaver_world_x()));
+    }
+
+    #[test]
+    fn air_double_down_drops_only_close_to_the_top_wave() {
+        let mut high = run();
+        high.tick = 12;
+        high.beaver.airborne = true;
+        high.beaver.vy = VEL;
+        high.beaver.y = high.sea.at(high.beaver_world_x()) - px(40);
+        high.down_tap = DOUBLE_TAP;
+        high.step(Input {
+            dive: true,
+            ..Input::default()
+        });
+        assert_eq!(high.beaver.lane_to, LANE_TOP);
+        let landed = coast_until_landed(&mut high);
+        assert!(landed.landed);
+        assert_eq!(high.beaver.lane, LANE_TOP);
+
+        let mut close = run();
+        close.tick = 12;
+        close.beaver.airborne = true;
+        close.beaver.vy = VEL;
+        close.beaver.y = close.sea.at(close.beaver_world_x()) - px(6);
+        close.down_tap = DOUBLE_TAP;
+        close.step(Input {
+            dive: true,
+            ..Input::default()
+        });
+        assert_eq!(close.beaver.lane_to, LANE_BOTTOM);
+        let landed = coast_until_landed(&mut close);
+        assert!(landed.landed);
+        assert!(!landed.wipeout);
+        assert_eq!(close.beaver.lane, LANE_BOTTOM);
+    }
+
+    #[test]
+    fn a_lane_jump_that_clears_lands_on_top_and_a_short_one_wipes_out() {
+        let mut cleared = run();
+        cleared.tick = 20;
+        cleared.beaver.airborne = true;
+        cleared.beaver.lane = LANE_BOTTOM;
+        cleared.beaver.lane_to = LANE_TOP;
+        cleared.beaver.vy = -VEL;
+        cleared.beaver.y = cleared.sea.at(cleared.beaver_world_x()) - px(8);
+        let landed = coast_until_landed(&mut cleared);
+        assert!(landed.landed);
+        assert!(!landed.wipeout);
+        assert_eq!(cleared.beaver.lane, LANE_TOP);
+        assert!(cleared.beaver.cleared == false);
+
+        let mut short = run();
+        short.tick = 20;
+        short.beaver.airborne = true;
+        short.beaver.lane = LANE_BOTTOM;
+        short.beaver.lane_to = LANE_TOP;
+        short.beaver.vy = VEL;
+        short.beaver.y = short.sea.front_at(short.beaver_world_x()) - px(4);
+        let landed = coast_until_landed(&mut short);
+        assert!(landed.wipeout);
+        assert_eq!(short.beaver.lane, LANE_BOTTOM);
+        assert_eq!(short.stun, WIPEOUT_FRAMES);
+        assert!(short.hearts < START_HEARTS);
+    }
+
+    #[test]
+    fn a_second_up_flips_on_the_top_lane_and_lane_jumps_on_the_bottom() {
+        let (crest_x, crest_tick) = first_where(|sea, x| sea.is_crest(x));
+        let mut top = jump_at(crest_x, crest_tick, SCROLL_SPEED, false);
+        top.step(Input::default());
+        top.step(Input {
+            jump: true,
+            ..Input::default()
+        });
+        assert!(top.beaver.flip > 0);
+        assert_eq!(top.beaver.lane_to, LANE_TOP);
+
+        let (front_x, front_tick) = first_where(|sea, x| sea.front_is_crest(x));
+        let mut bottom = run();
+        bottom.speed = SCROLL_SPEED;
+        place_lane(&mut bottom, front_x, front_tick, LANE_BOTTOM);
+        let events = bottom.step(Input {
+            jump: true,
+            ..Input::default()
+        });
+        assert!(events.jumped);
+        assert_eq!(bottom.beaver.flip, 0);
+        assert_eq!(bottom.beaver.lane, LANE_BOTTOM);
+        bottom.step(Input::default());
+        bottom.step(Input {
+            jump: true,
+            ..Input::default()
+        });
+        assert_eq!(bottom.beaver.flip, 0);
+        assert_eq!(bottom.beaver.lane_to, LANE_TOP);
+        assert_eq!(bottom.beaver.lane, LANE_BOTTOM);
+    }
+
+    #[test]
+    fn rings_and_hearts_split_across_lanes_and_only_a_jump_threads_them() {
+        let mut world = run();
+        world.hearts = START_HEARTS - 1;
+        world.ring_count = HEART_EVERY_RINGS - 1;
+        let mut lanes = [0u32; 2];
+        for _ in 0..90 {
+            world.ring_timer = 1;
+            world.step(Input::default());
+            if let Some(index) = world.rings.iter().position(|slot| slot.is_some()) {
+                lanes[world.ring_lane[index] as usize] += 1;
+                world.rings = [None; RING_SLOTS];
+            }
+        }
+        assert!(lanes[0] > 25, "top rings {}", lanes[0]);
+        assert!(lanes[1] > 25, "bottom rings {}", lanes[1]);
+
+        for lane in [LANE_TOP, LANE_BOTTOM] {
+            let mut caught = run();
+            caught.tick = 15;
+            let surface = caught.sea.surface(caught.beaver_world_x(), lane);
+            caught.beaver.airborne = true;
+            caught.beaver.lane = lane;
+            caught.beaver.lane_to = lane;
+            caught.beaver.vy = -GRAVITY;
+            caught.beaver.y = surface - RING_LIFT + px(14);
+            let step = caught.speed >> 2;
+            caught.rings[0] = Some(Actor {
+                x: caught.beaver.x + step,
+                y: 0,
+            });
+            caught.ring_lane[0] = lane;
+            let events = caught.step(Input::default());
+            assert!(events.ring, "lane {lane} jump missed the ring");
+            assert!(caught.rings[0].is_none());
+
+            let mut grounded = run();
+            grounded.tick = 15;
+            grounded.beaver.lane = lane;
+            grounded.beaver.lane_to = lane;
+            let surface = grounded.sea.surface(grounded.beaver_world_x(), lane);
+            grounded.beaver.y = surface;
+            let step = grounded.speed >> 2;
+            grounded.rings[0] = Some(Actor {
+                x: grounded.beaver.x + step,
+                y: 0,
+            });
+            grounded.ring_lane[0] = lane;
+            let events = grounded.step(Input::default());
+            assert!(!events.ring, "lane {lane} grounded beaver scored");
+            assert!(grounded.rings[0].is_some());
+        }
+    }
+
+    #[test]
+    fn a_bottom_crest_jump_can_reach_the_top_lane() {
+        let mut found = false;
+        for tick in 2..80u32 {
+            let sea = Sea::new(tick, tier(tick));
+            for x in (0..WAVE_PERIOD_PX).step_by(4) {
+                let world_x = px(x) as i32;
+                if !sea.front_in_top_fifth(world_x) {
+                    continue;
+                }
+                let mut world = run();
+                world.speed = 2 * VEL;
+                place_lane(&mut world, world_x, tick, LANE_BOTTOM);
+                let events = world.step(Input {
+                    jump: true,
+                    right: true,
+                    ..Input::default()
+                });
+                if !events.jumped {
+                    continue;
+                }
+                world.step(Input::default());
+                world.step(Input {
+                    jump: true,
+                    ..Input::default()
+                });
+                let landed = coast_until_landed(&mut world);
+                if landed.landed && !landed.wipeout && world.beaver.lane == LANE_TOP {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        assert!(found, "no bottom-lane crest jump reached the top wave");
+    }
+
+    #[test]
+    fn gull_boxes_follow_the_beaver_on_either_lane() {
+        let beaver = Beaver {
+            x: px(80),
+            y: px(110),
+            vx: 0,
+            vy: 0,
+            airborne: false,
+            flip: 0,
+            flips: 0,
+            perfect: false,
+            air_time: 0,
+            rings: 0,
+            lane: LANE_TOP,
+            lane_to: LANE_TOP,
+            cleared: false,
+        };
+        let on_top = Actor {
+            x: beaver.x,
+            y: beaver.y - px(8),
+        };
+        assert!(overlap(beaver_box(beaver, false), gull_box(on_top)));
+        let mut low = beaver;
+        low.y = px(150);
+        low.lane = LANE_BOTTOM;
+        assert!(!overlap(beaver_box(low, false), gull_box(on_top)));
+        let on_bottom = Actor {
+            x: low.x,
+            y: low.y - px(8),
+        };
+        assert!(overlap(beaver_box(low, false), gull_box(on_bottom)));
+        assert!(!overlap(
+            beaver_box(low, true),
+            gull_box(Actor {
+                x: low.x,
+                y: beaver_box(low, false).y,
+            })
+        ));
     }
 }

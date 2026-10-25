@@ -62,18 +62,13 @@ uint8_t wave_tier(uint32_t tick) BANKED {
     return t > 8 ? 8 : (uint8_t)t;
 }
 
-/* Signed 8 x 8 product by quarter squares in byte arithmetic; callers keep |a| + |b| < 256. */
-static int16_t mul8(int8_t a, int8_t b) {
-    uint8_t ax = a < 0 ? (uint8_t)-a : (uint8_t)a;
-    uint8_t ay = b < 0 ? (uint8_t)-b : (uint8_t)b;
-    uint8_t sum = (uint8_t)(ax + ay);
-    uint8_t dif = ax > ay ? (uint8_t)(ax - ay) : (uint8_t)(ay - ax);
-    int16_t prod = (int16_t)(QSQ[sum] - QSQ[dif]);
-    return ((uint8_t)(a ^ b) & 0x80) ? (int16_t)-prod : prod;
-}
+uint8_t front_num = 5;
 
-/* base + ((base * delta) >> 8) equals (base * (256 + delta)) >> 8 exactly. */
-#define SCALE8(base, delta) ((int16_t)((base) + (int16_t)(mul8((base), (delta)) >> 8)))
+/* 5 + min(tier, 6) / 2 */
+static uint8_t front_scale(uint8_t tier) {
+    if (tier > 6) tier = 6;
+    return (uint8_t)(5 + (tier >> 1));
+}
 
 /* a * b for a >= 0: one absolute value and the sign of b decide everything. */
 static int16_t mul8u(uint8_t a, int8_t b) {
@@ -316,6 +311,7 @@ static void prepare(uint32_t tick, uint8_t tier) {
     if (tier > 8) tier = 8;
     rf_amp1 = AMP1_TAB + (uint16_t)tier * 256;
     rf_amp2 = AMP2_TAB + (uint16_t)tier * 256;
+    front_num = front_scale(tier);
 }
 
 void sea_build(uint32_t tick, uint8_t tier) BANKED {
@@ -327,22 +323,6 @@ void sea_build(uint32_t tick, uint8_t tier) BANKED {
 void sea_refresh(uint32_t tick, uint8_t tier) BANKED {
     prepare(tick, tier);
     refresh_quarter((uint8_t)tick & 3);
-}
-
-int16_t front_height(uint16_t phase_px, uint32_t tick, uint8_t tier) BANKED {
-    uint16_t phase = phase_px & 511;
-    uint16_t shifted = (uint16_t)(phase + 96 + (uint16_t)(tick & 511)) & 511;
-    int8_t delta = ENV_AMP[shifted];
-    uint8_t t1 = (uint8_t)tick;
-    uint8_t a0 = (uint8_t)(phase + phase + (uint8_t)(t1 * 4));
-    uint8_t a1 = (uint8_t)(phase * 4 + (uint8_t)(t1 * 5));
-    int8_t amp;
-    int16_t primary, chop;
-    if (tier > 8) tier = 8;
-    amp = (int8_t)SCALE8((int8_t)(10 + 2 * tier), delta);
-    primary = (int16_t)(mul8(amp, SIN8[a0]) >> 2);
-    chop = (int16_t)(((int16_t)(6 * SIN8[a1])) >> 2);
-    return (int16_t)(FRONT_HORIZON + primary + chop + ENV_LIFT3[shifted]);
 }
 
 int16_t steer_scale(int16_t slope) BANKED {
@@ -368,6 +348,11 @@ static int16_t mul_frac(int16_t d, uint8_t frac) {
 static uint8_t le_index, le_frac, wk_seek, wk_left;
 static int8_t wk_dir;
 static int16_t le_result, wk_prev;
+/* Front-lane walk: fa_at is the sea-table pixel, fa_dir is ±4 (one 8px front step). */
+static uint16_t fa_at;
+static int8_t fa_dir;
+static uint8_t fa_seek, fa_left;
+static int16_t fa_prev;
 
 /* le_core: HL = lerp of world.heights at (le_index, le_frac), exactly as the C below: the
  * difference times frac by shift-and-add, an arithmetic shift by 3, plus h0. Clobbers A B C D E.
@@ -387,7 +372,7 @@ le_core:
         add a, a
         ld l, a
         ld h, #0x00
-        ld de, #(_world + 114)
+        ld de, #(_world + 117)
         add hl, de
         ld a, (hl+)
         ld c, a
@@ -479,6 +464,135 @@ wk_cont:
         ld hl, #_wk_left
         dec (hl)
         jr NZ, wk_loop
+        ret
+    __endasm;
+}
+
+/* 112*64 and 140*64. The walker bakes these in; the typedef fails the build if they move. */
+typedef char fa_horizon_ok[(HORIZON == 7168 && FRONT_HORIZON == 8960) ? 1 : -1];
+
+/* Height of the bottom lane at sea-pixel fa_at, in HL. Same truncation as front_at_px:
+ * delta * 5 by shift-add, then one more delta per sixteenth front_num has over 5. */
+static void fa_height(void) __naked {
+    __asm
+        ld hl, #_fa_at
+        ld a, (hl+)
+        ld h, (hl)
+        ld l, a
+        ld a, h
+        and a, #0x01
+        ld h, a
+        ld a, l
+        and a, #0x07
+        ld (#_le_frac), a
+        srl h
+        rr l
+        srl h
+        rr l
+        srl h
+        rr l
+        ld a, l
+        ld (#_le_index), a
+        call le_core
+        ld de, #0x1c00
+        ld a, l
+        sub a, e
+        ld l, a
+        ld a, h
+        sbc a, d
+        ld h, a
+        ld d, h
+        ld e, l
+        add hl, hl
+        add hl, hl
+        add hl, de
+        ld a, (#_front_num)
+        sub a, #5
+        jr Z, fa_scaled
+fa_more:
+        add hl, de
+        dec a
+        jr NZ, fa_more
+fa_scaled:
+        sra h
+        rr l
+        sra h
+        rr l
+        sra h
+        rr l
+        sra h
+        rr l
+        ld de, #0x2300
+        add hl, de
+        ret
+    __endasm;
+}
+
+/* fa_prev = bottom-lane height at sea pixel fa_at, through fa_height. */
+static void fa_sample(void) __naked {
+    __asm
+        call _fa_height
+        ld a, l
+        ld (#_fa_prev), a
+        ld a, h
+        ld (#_fa_prev + 1), a
+        ret
+    __endasm;
+}
+
+/* The walk from fa_at, whose height the caller already has in fa_prev. */
+static void fa_walk(void) __naked {
+    __asm
+        ld a, #20
+        ld (#_fa_left), a
+fa_loop:
+        ld hl, #_fa_at
+        ld a, (hl)
+        ld b, a
+        inc hl
+        ld c, (hl)
+        ld a, (#_fa_dir)
+        ld e, a
+        rlca
+        sbc a, a
+        ld d, a
+        ld l, b
+        ld h, c
+        add hl, de
+        ld a, l
+        ld (#_fa_at), a
+        ld a, h
+        ld (#_fa_at + 1), a
+        call _fa_height
+        ld a, (#_fa_prev)
+        ld e, a
+        ld a, (#_fa_prev + 1)
+        ld d, a
+        ld a, (#_fa_seek)
+        or a
+        jr Z, fa_desc
+        ld a, l
+        sub a, e
+        ld a, h
+        sbc a, d
+        bit 7, a
+        ret Z
+        jr fa_keep
+fa_desc:
+        ld a, e
+        sub a, l
+        ld a, d
+        sbc a, h
+        bit 7, a
+        ret Z
+fa_keep:
+        ld a, l
+        ld (#_fa_prev), a
+        ld a, h
+        ld (#_fa_prev + 1), a
+        ld hl, #_fa_left
+        dec (hl)
+        jr NZ, fa_loop
         ret
     __endasm;
 }
@@ -623,4 +737,141 @@ int8_t sea_jump_meter_s(const Samples *s) BANKED {
     } else {
         return (int8_t)METER_DESCENT[descent_progress_of(s)];
     }
+}
+
+/* Bottom lane: the height table, twice as long and front_num/16 as tall. The scale is a
+ * shift-add in fa_height so the jump-meter walk stays in this bank; a banked sea_at_px plus a
+ * 32-bit multiply per sample pushed one grounded frame past the two-vblank budget. */
+static int16_t front_at_px(int32_t world_px) {
+#ifdef __SDCC
+    /* fa_height keeps nine bits of the pixel, so the low half of world_px is all it needs. */
+    fa_at = (uint16_t)(((int16_t)world_px >> 1) + FRONT_PHASE);
+    fa_sample();
+    return fa_prev;
+#else
+    int16_t sample = (int16_t)((world_px >> 1) + FRONT_PHASE);
+    uint16_t phase = (uint16_t)(sample & 511);
+    int16_t delta = (int16_t)(lerp_entry((uint8_t)(phase >> 3), (uint8_t)(phase & 7)) - HORIZON);
+    return (int16_t)(FRONT_HORIZON + (int16_t)((int16_t)(delta * front_num) >> 4));
+#endif
+}
+
+int16_t front_at(int32_t world_x) BANKED { return front_at_px(world_x >> 6); }
+
+static void front_sample(int32_t world_x, Samples *s) {
+    int32_t px = world_x >> 6;
+    s->px = (int16_t)px;
+#ifdef __SDCC
+    /* Neighbours 8 world px apart are 4 table px apart; nine bits of the pixel suffice. */
+    fa_at = (uint16_t)(((int16_t)px >> 1) + FRONT_PHASE - 4);
+    fa_sample();
+    s->left = fa_prev;
+    fa_at += 4;
+    fa_sample();
+    s->here = fa_prev;
+    fa_at += 4;
+    fa_sample();
+    s->right = fa_prev;
+#else
+    s->left = front_at_px(px - 8);
+    s->here = front_at_px(px);
+    s->right = front_at_px(px + 8);
+#endif
+}
+
+int16_t front_slope(int32_t world_x) BANKED {
+    Samples s;
+    front_sample(world_x, &s);
+    return (int16_t)(s.right - s.left);
+}
+
+/* `here` is the lane height at world_x, which the caller has sampled already. */
+static int16_t front_walk(int32_t world_x, int16_t here, int8_t dir, uint8_t seek_crest) {
+#ifdef __SDCC
+    int16_t px = (int16_t)(world_x >> 6);
+    fa_at = (uint16_t)((px >> 1) + FRONT_PHASE);
+    fa_prev = here;
+    fa_dir = (int8_t)(dir * 4);
+    fa_seek = seek_crest;
+    fa_walk();
+    return fa_prev;
+#else
+    int32_t at = world_x >> 6;
+    int16_t prev = here;
+    int16_t step_px = (int16_t)(dir * 8);
+    uint8_t step;
+    for (step = 0; step < 20; step++) {
+        int16_t next;
+        at += step_px;
+        next = front_at_px(at);
+        if (seek_crest ? next >= prev : next <= prev) break;
+        prev = next;
+    }
+    return prev;
+#endif
+}
+
+static int16_t front_climb(int32_t world_x, int16_t here) {
+    int16_t crest = front_walk(world_x, here, 1, 1);
+    int16_t trough = front_walk(world_x, here, -1, 0);
+    return fraction((int16_t)(trough - here), (int16_t)(trough - crest));
+}
+
+static int16_t front_descent(int32_t world_x, int16_t here) {
+    int16_t crest = front_walk(world_x, here, -1, 1);
+    int16_t trough = front_walk(world_x, here, 1, 0);
+    return fraction((int16_t)(here - crest), (int16_t)(trough - crest));
+}
+
+/* Same bar as the top lane, from one sample. The tables replace the divisions. */
+static int8_t front_meter_of(int32_t world_x, const Samples *s) {
+    int16_t slope = slope_of(s);
+    if (trough_of(s)) return 0;
+    if (crest_of(s) || slope < 0) {
+        int16_t top = front_climb(world_x, s->here);
+        if (crest_of(s) || top >= 204) {
+            if (top < 204) top = 204;
+            return (int8_t)METER_TOP[top - 204];
+        }
+        return (int8_t)METER_CLIMB[top];
+    }
+    return (int8_t)METER_DESCENT[front_descent(world_x, s->here)];
+}
+
+uint8_t front_jump_allowed(int32_t world_x) BANKED {
+    Samples s;
+    front_sample(world_x, &s);
+    if (trough_of(&s)) return 0;
+    return crest_of(&s) || slope_of(&s) < 0;
+}
+
+uint8_t front_in_top_fifth(int32_t world_x) BANKED {
+    Samples s;
+    front_sample(world_x, &s);
+    if (crest_of(&s)) return 1;
+    return slope_of(&s) < 0 && front_climb(world_x, s.here) >= 204;
+}
+
+int8_t front_jump_meter(int32_t world_x) BANKED {
+    Samples s;
+    front_sample(world_x, &s);
+    return front_meter_of(world_x, &s);
+}
+
+/* Grounded bottom lane: height, slope, jump permission and the meter from one sample. */
+void front_ride(int32_t world_x, FrontRide *out) BANKED {
+    Samples s;
+    front_sample(world_x, &s);
+    out->surface = s.here;
+    out->slope = slope_of(&s);
+    out->allowed = (uint8_t)(!trough_of(&s) && (crest_of(&s) || slope_of(&s) < 0));
+    out->meter = front_meter_of(world_x, &s);
+}
+
+int16_t lane_surface(int32_t world_x, uint8_t lane) BANKED {
+    return lane == LANE_BOTTOM ? front_at(world_x) : sea_at(world_x);
+}
+
+int16_t lane_slope(int32_t world_x, uint8_t lane) BANKED {
+    return lane == LANE_BOTTOM ? front_slope(world_x) : sea_slope(world_x);
 }

@@ -9,7 +9,7 @@ use agb::{
     include_aseprite, include_background_gfx,
 };
 use beaver_sim::{
-    Banner, FLIP_FRAMES, METER_LEN, Phase, SCREEN_W, VEL, WIPEOUT_FRAMES, World, front_height, px,
+    Banner, FLIP_FRAMES, METER_LEN, Phase, SCREEN_W, VEL, WIPEOUT_FRAMES, World, px,
 };
 
 const SCREEN_WIDTH: i32 = SCREEN_W as i32;
@@ -73,6 +73,11 @@ const SC_TOWER_MID: usize = 82;
 const SC_TOWER_BASE: usize = 83;
 const SC_CITY_A: usize = 84;
 const SC_CITY_B: usize = 85;
+/// Faces under a waterline that sat at sub 3..=7: four phases per sub, carrying the crest's
+/// dashed echoes into the row below. Then the same for the front face, one per sub.
+const ECHO_FACE0: usize = 86;
+const FRONT_ECHO_FACE0: usize = 106;
+const ECHO_SUB: usize = 3;
 
 /// The island layer is 64 columns wide and scrolls at a third of the surf. Its rows 8-11 are
 /// streamed from a scene that repeats every SCENE_COLS columns (24 surf pixels each): open
@@ -116,7 +121,8 @@ fn shore_column(col: u32) -> [usize; 4] {
 
 /// Rows of the two wave layers that `paint_wave` rewrites.
 const NEAR_ROWS: core::ops::Range<i32> = 4..22;
-const FRONT_ROWS: core::ops::Range<i32> = 14..22;
+/// The bottom lane steepens with the tier (front_scale), so its crests climb past y 112.
+const FRONT_ROWS: core::ops::Range<i32> = 12..22;
 
 pub struct Layers {
     pub sky: RegularBackground,
@@ -232,6 +238,14 @@ impl Layers {
     }
 }
 
+/// Blinking PAUSE over the frozen scene. `frames` counts from the moment Start was pressed.
+pub fn draw_pause(frame: &mut GraphicsFrame, frames: u32) {
+    if (frames / 30) % 2 == 0 {
+        // Same slot as the banners: the dark HUD band, where white text stays readable.
+        draw_text(frame, b"PAUSE", 100, 24);
+    }
+}
+
 pub fn draw_actors(frame: &mut GraphicsFrame, world: &World, new_best: bool) {
     if world.phase == Phase::Play {
         let flap = ((world.tick / 10) % 2) as usize;
@@ -339,7 +353,6 @@ pub fn install_palettes(gfx: &mut agb::display::Graphics) {
 fn paint_wave(layers: &mut Layers, world: &World) {
     let tiles = &background::TILES.tiles;
     let settings = &background::TILES.tile_settings;
-    let tier = world.wave_tier();
     for col in 0..32i32 {
         let world_x = world.scroll + px(col as i16 * 8) as i32;
         let surface = pixels(world.sea.at(world_x)).clamp(48, 152);
@@ -372,7 +385,11 @@ fn paint_wave(layers: &mut Layers, world: &World) {
             } else if y < row {
                 0
             } else if y == row + 1 {
-                FACE0 + face_phase
+                if sub >= ECHO_SUB {
+                    ECHO_FACE0 + (sub - ECHO_SUB) * 4 + face_phase
+                } else {
+                    FACE0 + face_phase
+                }
             } else if y == row + 2 {
                 BODY0 + body_phase
             } else if y <= row + 4 {
@@ -391,8 +408,8 @@ fn paint_wave(layers: &mut Layers, world: &World) {
             );
         }
 
-        let front_px = (((world.scroll * 3 / 2) >> 6) + col * 8) as u16;
-        let front_surface = pixels(front_height(front_px, world.tick, tier)).clamp(116, 156);
+        let front_surface = pixels(world.sea.front_at(world_x))
+            .clamp(FRONT_ROWS.start * 8, FRONT_ROWS.end * 8 - 1);
         let front_row = front_surface / 8;
         let front_sub = front_surface.rem_euclid(8) as usize;
         for y in FRONT_ROWS {
@@ -401,7 +418,11 @@ fn paint_wave(layers: &mut Layers, world: &World) {
             } else if y == front_row {
                 FRONT_LINE0 + front_sub
             } else if y == front_row + 1 {
-                FRONT_FACE
+                if front_sub >= ECHO_SUB {
+                    FRONT_ECHO_FACE0 + (front_sub - ECHO_SUB)
+                } else {
+                    FRONT_FACE
+                }
             } else {
                 FRONT_DEEP
             };
@@ -420,7 +441,7 @@ fn paint_wave(layers: &mut Layers, world: &World) {
 
 fn draw_wake(frame: &mut GraphicsFrame, world: &World) {
     let feet = world.beaver.y;
-    let surface = world.sea.at(world.beaver_world_x());
+    let surface = world.sea.surface(world.beaver_world_x(), world.beaver.lane);
     if world.beaver.airborne && (feet - surface).abs() > px(12) {
         return;
     }

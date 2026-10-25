@@ -45,8 +45,11 @@
 #define DIVE_GRAVITY 154
 #define JUMP_VY (-(VEL * 4))
 #define EARLY_JUMP_VY (-(VEL * 2))
-#define RIGHT_TUG_VY (VEL / 2)
+#define RIGHT_TUG_VY (3 * VEL / 4)
 #define MAX_JUMP_VY (-(VEL * 7))
+#define DOUBLE_TAP 12
+#define HOP_VY (-VEL)
+#define DROP_WINDOW PX(10)
 
 #define METER_LEN 96
 #define METER_GREEN_START 32
@@ -90,6 +93,9 @@
 /* Wave. */
 #define HORIZON (112 * FP)
 #define FRONT_HORIZON (140 * FP)
+#define LANE_TOP 0
+#define LANE_BOTTOM 1
+#define FRONT_PHASE 128
 #define WAVE_PERIOD_PX 512
 #define TABLE_LEN 64
 #define SLOPE_MAX (4 * FP)
@@ -120,6 +126,9 @@ typedef struct {
     uint8_t perfect;
     uint16_t air_time;
     uint8_t rings;
+    uint8_t lane;
+    uint8_t lane_to;
+    uint8_t cleared;
 } Beaver;
 
 typedef struct {
@@ -166,6 +175,11 @@ typedef struct {
     int16_t heights[TABLE_LEN];
     uint8_t start_held;
     uint8_t jump_held;
+    uint8_t dive_held;
+    uint8_t down_tap;
+    uint8_t up_tap;
+    uint8_t ring_lane[RING_SLOTS];
+    uint8_t heart_lane;
     /* Difficulty tier (tick / 900, at most 8) kept incrementally to avoid a 32-bit divide. */
     uint8_t tier;
     uint16_t tier_ticks;
@@ -184,7 +198,7 @@ typedef struct {
 } Events;
 
 /* Size of the state record written by world_encode; matches beaver_sim::trace::STATE_LEN. */
-#define STATE_LEN 116
+#define STATE_LEN 126
 
 /* The one world. A global so SDCC addresses every field directly; pointer-relative access
  * costs the SM83 several times more. */
@@ -208,6 +222,9 @@ typedef struct {
 } Samples;
 
 uint8_t wave_tier(uint32_t tick) BANKED;
+/* Bottom-lane height in sixteenths of the top wave's swing (beaver_sim front_scale), set by
+ * sea_build / sea_refresh for the tier they were given. The renderer reads it too. */
+extern uint8_t front_num;
 void sea_build(uint32_t tick, uint8_t tier) BANKED;
 void sea_refresh(uint32_t tick, uint8_t tier) BANKED;
 int16_t sea_at_px(int16_t world_px) BANKED;
@@ -220,7 +237,21 @@ int8_t sea_jump_meter_s(const Samples *s) BANKED;
 int16_t sea_slope(int32_t world_x) BANKED;
 uint8_t sea_is_crest(int32_t world_x) BANKED;
 uint8_t sea_is_trough(int32_t world_x) BANKED;
-int16_t front_height(uint16_t phase_px, uint32_t tick, uint8_t tier) BANKED;
+typedef struct FrontRide {
+    int16_t surface;
+    int16_t slope;
+    uint8_t allowed;
+    int8_t meter;
+} FrontRide;
+
+int16_t front_at(int32_t world_x) BANKED;
+int16_t front_slope(int32_t world_x) BANKED;
+void front_ride(int32_t world_x, FrontRide *out) BANKED;
+uint8_t front_jump_allowed(int32_t world_x) BANKED;
+uint8_t front_in_top_fifth(int32_t world_x) BANKED;
+int8_t front_jump_meter(int32_t world_x) BANKED;
+int16_t lane_surface(int32_t world_x, uint8_t lane) BANKED;
+int16_t lane_slope(int32_t world_x, uint8_t lane) BANKED;
 int16_t steer_scale(int16_t slope) BANKED;
 
 /* save.c */

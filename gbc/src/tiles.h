@@ -22,19 +22,16 @@
 #define TILE_FACE       64
 #define TILE_BODY       65
 #define TILE_ABYSS      66
-#define TILE_CURL       67
-#define TILE_SPRAY      69
-#define TILE_FRONT_LINE 71
-#define TILE_FRONT_FACE 79
-#define TILE_FRONT_DEEP 80
-#define TILE_RAMP       81
-#define TILE_RAMP_COUNT 205
-#define TILE_RAMP1_COUNT 175
-#define TILE_RAMP0      166
-#define TILE_COUNT      256
+#define TILE_SPRAY      67
+#define TILE_FRONT_DEEP 69
+#define TILE_RAMP       70
+#define TILE_RAMP_COUNT 162
+#define TILE_RAMP1_COUNT 162
+#define TILE_RAMP0      194
+#define TILE_COUNT      232
 
 /* Far-shore scenery, VRAM bank 0 after the ramps (see scenery_tiles in gen_assets). */
-#define TILE_SCENE      230
+#define TILE_SCENE      232
 #define SC_LAND_TOP     (TILE_SCENE + 0)
 #define SC_LAND         (TILE_SCENE + 1)
 #define SC_LAND_TOP_L   (TILE_SCENE + 2)
@@ -49,7 +46,7 @@
 #define SC_TOWER_MID    (TILE_SCENE + 11)
 #define SC_TOWER_BASE   (TILE_SCENE + 12)
 #define SC_CITY_A       (TILE_SCENE + 13)
-#define SC_CITY_B       (TILE_SCENE + 14)
+#define SC_CITY_B       SC_CITY_A
 
 /* Background palette index for every tile, matching the indexed PNG palette order. */
 #define PAL_HUD 0

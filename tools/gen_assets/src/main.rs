@@ -231,9 +231,11 @@ fn solid(color: u8) -> Image {
 
 /// 0 empty, 1-4 sky, 5-8 cloud, 9 deep, 10 far top, 11 far body,
 /// 12-27 waterline, 28-31 splash, 32-39 island, 40-47 ship, 48-51 sun,
-/// 52 front deep, 53-60 front waterline, 61-70 wave faces, 71-85 shore.
+/// 52 front deep, 53-60 front waterline, 61-70 wave faces, 71-85 shore,
+/// 86-105 faces carrying the echoes of a low waterline (sub 3-7, four phases each),
+/// 106-110 the same for the front face.
 fn tileset() -> Image {
-    let mut sheet = Image::new(8 * 86, 8);
+    let mut sheet = Image::new(8 * 111, 8);
     sheet.blit_tile(0, &tile());
     sheet.blit_tile(1, &sky_band(SKY0, SKY1));
     sheet.blit_tile(2, &sky_band(SKY1, SKY2));
@@ -260,7 +262,7 @@ fn tileset() -> Image {
     }
     // 61..64 face, 65..66 body, 67 abyss, 68..69 curl, 70 front face.
     for variant in 0..4 {
-        sheet.blit_tile(61 + variant, &face_tile(variant));
+        sheet.blit_tile(61 + variant, &face_tile(variant, None));
     }
     for variant in 0..2 {
         sheet.blit_tile(65 + variant, &body_tile(variant));
@@ -269,12 +271,33 @@ fn tileset() -> Image {
     for frame in 0..2 {
         sheet.blit_tile(68 + frame, &curl_tile(frame));
     }
-    sheet.blit_tile(70, &front_face_tile());
+    sheet.blit_tile(70, &front_face_tile(None));
     for (i, tile) in shore_tiles().iter().enumerate() {
         sheet.blit_tile(71 + i, tile);
     }
+    for sub in 3..8 {
+        for variant in 0..4 {
+            sheet.blit_tile(86 + (sub - 3) * 4 + variant, &face_tile(variant, Some(sub)));
+        }
+        sheet.blit_tile(106 + (sub - 3), &front_face_tile(Some(sub)));
+    }
     sheet
 }
+
+/// The white of a wave crest, `below` pixels under the surface: two solid rows, then dashed
+/// echoes three and five rows down, each dash a pixel further right than the one above, so the
+/// line reads as a wave with some body to it (the Pikachu-surf look, at half strength).
+fn surf_white(x: i32, below: i32) -> bool {
+    match below {
+        0 | 1 => true,
+        3 => (x + 1).rem_euclid(4) < 2,
+        5 => (x + 2).rem_euclid(4) < 2,
+        _ => false,
+    }
+}
+
+/// Rows of a tile under a waterline tile whose surface sat at `sub` still carry echoes.
+const ECHO_ROWS: i32 = 6;
 
 /// Paints over `base` from eight rows of eight characters; `.` keeps the base pixel.
 fn ascii_tile(base: Image, rows: [&str; 8], key: &[(char, u8)]) -> Image {
@@ -420,11 +443,19 @@ fn shore_tiles() -> Vec<Image> {
 }
 
 /// First row under the waterline: lit water fading down, with diagonal streaks that
-/// animate across the four variants.
-fn face_tile(variant: usize) -> Image {
+/// animate across the four variants. With `carry`, the waterline above sat low in its tile
+/// (sub 3-7) and its crest echoes run on into the top rows here.
+fn face_tile(variant: usize, carry: Option<usize>) -> Image {
     let mut tile = tile();
     for y in 0..8i32 {
         for x in 0..8i32 {
+            if let Some(sub) = carry {
+                let below = y + 8 - sub as i32;
+                if below < ECHO_ROWS {
+                    tile.set(x, y, if surf_white(x, below) { WHITE } else { lit_water(x, y, variant) });
+                    continue;
+                }
+            }
             let streak = (x + y + variant as i32 * 2) % 8 == 0 && y < 6;
             let color = if streak {
                 WATER_HI
@@ -516,10 +547,18 @@ fn curl_tile(frame: usize) -> Image {
     tile
 }
 
-fn front_face_tile() -> Image {
+/// Row under the front waterline; `carry` as in face_tile.
+fn front_face_tile(carry: Option<usize>) -> Image {
     let mut tile = tile();
     for y in 0..8i32 {
         for x in 0..8i32 {
+            if let Some(sub) = carry {
+                let below = y + 8 - sub as i32;
+                if below < ECHO_ROWS {
+                    tile.set(x, y, if surf_white(x, below) { WHITE } else { DEEP_HI });
+                    continue;
+                }
+            }
             let color = if y == 0 {
                 if x % 3 == 0 { FOAM_DIM } else { DEEP_HI }
             } else if y == 3 && (2..6).contains(&x) {
@@ -593,26 +632,23 @@ fn front_deep_tile() -> Image {
     tile
 }
 
+/// Bottom lane waterline: a two-pixel crest at `sub`, dashed echoes under it over lit water,
+/// then the dark near face.
 fn front_waterline(sub: usize) -> Image {
     let mut tile = tile();
     for x in 0..8i32 {
-        let jag = match x % 4 {
-            0 => -1,
-            2 => 1,
-            _ => 0,
-        };
-        let foam = (sub as i32 + jag).clamp(0, 7);
         for y in 0..8i32 {
-            let color = if y == foam - 1 && x % 2 == 0 {
-                WHITE
-            } else if y == foam {
-                FOAM
-            } else if y == foam + 1 {
-                DEEP_HI
-            } else if y > foam + 1 {
-                if (x + y * 2) % 3 == 0 { OUTLINE } else { DEEP }
-            } else {
+            let below = y - sub as i32;
+            let color = if below < 0 {
                 TRANSPARENT
+            } else if surf_white(x, below) {
+                WHITE
+            } else if below < ECHO_ROWS {
+                DEEP_HI
+            } else if (x + y * 2) % 3 == 0 {
+                OUTLINE
+            } else {
+                DEEP
             };
             tile.set(x, y, color);
         }
@@ -657,34 +693,32 @@ fn far_body() -> Image {
     tile
 }
 
+/// Lit water just under a crest, with a few flecks that differ between the two variants.
+fn lit_water(x: i32, y: i32, variant: usize) -> u8 {
+    if (x * 3 + y * 2 + variant as i32 * 4) % 7 == 0 {
+        WATER_HI
+    } else {
+        WATER_MID
+    }
+}
+
+/// Surf waterline: a two-pixel white crest at `sub`, dashed echoes under it over lit water,
+/// then the water body. The variant only moves the flecks.
 fn waterline(sub: usize, variant: usize) -> Image {
     let mut tile = tile();
     for x in 0..8i32 {
-        let jag = match (x as usize + variant * 2) % 4 {
-            0 => -1,
-            2 => 1,
-            _ => 0,
-        };
-        let foam = (sub as i32 + jag).clamp(0, 7);
         for y in 0..8i32 {
-            let color = if y == foam - 3 && (x as usize + variant) % 5 == 0 {
-                WHITE
-            } else if y == foam - 2 && (x as usize + variant) % 3 == 0 {
-                WATER_HI
-            } else if y == foam - 1 && (x as usize + variant) % 3 != 1 {
-                if x % 2 == 0 { WHITE } else { FOAM }
-            } else if y == foam {
-                if (x as usize + variant) % 5 == 0 {
-                    WHITE
-                } else {
-                    FOAM
-                }
-            } else if y == foam + 1 {
-                if x % 2 == 0 { WATER_HI } else { FOAM_DIM }
-            } else if y > foam + 1 {
-                if (x + y) % 2 == 0 { WATER_MID } else { DEEP }
-            } else {
+            let below = y - sub as i32;
+            let color = if below < 0 {
                 TRANSPARENT
+            } else if surf_white(x, below) {
+                WHITE
+            } else if below < ECHO_ROWS {
+                lit_water(x, y, variant)
+            } else if (x + y) % 2 == 0 {
+                WATER_MID
+            } else {
+                DEEP
             };
             tile.set(x, y, color);
         }

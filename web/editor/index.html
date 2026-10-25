@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sprite editor — Beaver Surf</title>
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="../?sys=gba">Game Boy Advance</a>
+      <a href="../?sys=gbc">Game Boy Color</a>
+      <a class="on" href="./">Editor</a>
+    </nav>
+    <p class="hint">Pick a size, draw with the brush, then Clone frame for the next pose. Keys 1–4 choose a color. [ and ] change frame. Export PNG downloads an indexed sheet.</p>
+  </header>
+  <div class="app">
+    <div class="swatches" id="swatches"></div>
+    <div class="stage">
+      <div class="toolbar">
+        <button type="button" id="tool-draw" class="on">Brush</button>
+        <button type="button" id="tool-fill">Fill</button>
+        <button type="button" id="tool-pick">Pick</button>
+        <button type="button" id="undo">Undo</button>
+        <button type="button" id="redo">Redo</button>
+      </div>
+      <div class="viewport" id="viewport"><canvas id="view"></canvas></div>
+      <div class="frames" id="frames"></div>
+      <div class="row">
+        <button type="button" id="clone">Clone frame</button>
+        <button type="button" id="copy-png">Copy PNG</button>
+        <button type="button" id="play">Play</button>
+        <button type="button" id="drop-frame">Delete frame</button>
+      </div>
+      <p id="status"></p>
+    </div>
+    <div class="panel">
+      <h2>Hardware</h2>
+      <label>System
+        <select id="system">
+          <option value="gbc">Game Boy Color</option>
+          <option value="gb">Game Boy</option>
+        </select>
+      </label>
+      <label id="look-label">Screen
+        <select id="look">
+          <option value="green">Green</option>
+          <option value="gray">Pocket gray</option>
+        </select>
+      </label>
+      <label>Kind
+        <select id="kind">
+          <option value="sprite">Sprite (color 0 clear)</option>
+          <option value="tile">Background tile</option>
+        </select>
+      </label>
+
+      <h2>Palette</h2>
+      <div class="row" id="pal-tabs"></div>
+      <label>Name
+        <input id="pal-name" type="text" maxlength="24" autocomplete="off">
+      </label>
+      <div class="sliders" id="sliders">
+        <label>Red <input id="ch-r" type="range" min="0" max="31" value="0"></label>
+        <label>Green <input id="ch-g" type="range" min="0" max="31" value="0"></label>
+        <label>Blue <input id="ch-b" type="range" min="0" max="31" value="0"></label>
+      </div>
+      <label>Presets
+        <select id="preset"></select>
+      </label>
+      <div class="row">
+        <button type="button" id="pal-add">Add palette</button>
+        <button type="button" id="pal-dup">Duplicate</button>
+        <button type="button" id="pal-del">Remove</button>
+      </div>
+      <button type="button" id="pal-save">Remember this palette</button>
+
+      <h2>Frame</h2>
+      <label>Size
+        <select id="size">
+          <option value="8x8">8×8 tile</option>
+          <option value="8x16">8×16</option>
+          <option value="16x16">16×16</option>
+          <option value="24x32">24×32 ring</option>
+          <option value="32x16">32×16 board</option>
+          <option value="32x32" selected>32×32 beaver</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+      <div class="row">
+        <label>Width <input id="width" type="number" min="8" max="256" step="8" value="32"></label>
+        <label>Height <input id="height" type="number" min="8" max="256" step="8" value="32"></label>
+      </div>
+      <div class="row">
+        <button type="button" id="zoom-out">−</button>
+        <span id="zoom-label">12×</span>
+        <button type="button" id="zoom-in">+</button>
+      </div>
+      <label class="row"><input id="onion" type="checkbox" checked> Onion skin of the previous frame</label>
+
+      <h2>File</h2>
+      <label>File name
+        <input id="file-name" type="text" value="sprite" maxlength="40" autocomplete="off">
+      </label>
+      <div class="row">
+        <button type="button" id="file-new">New</button>
+        <button type="button" id="file-open">Open</button>
+        <button type="button" id="file-save">Save</button>
+      </div>
+      <div class="row">
+        <button type="button" id="file-import">Import PNG</button>
+        <button type="button" id="file-export">Export PNG</button>
+      </div>
+      <input id="file-input" type="file" accept=".json,.png,application/json,image/png" hidden>
+      <h2>This 8×8 cell</h2>
+      <pre id="hex"></pre>
+    </div>
+  </div>
+  <script src="editor.js"></script>
+</body>
+</html>

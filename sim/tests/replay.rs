@@ -19,7 +19,7 @@ fn every_trace_replays_exactly() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "trace"))
         .collect();
     traces.sort();
-    assert_eq!(traces.len(), 8, "expected the eight scripted traces");
+    assert_eq!(traces.len(), 9, "expected the nine scripted traces");
 
     for path in traces {
         let bytes = fs::read(&path).unwrap();

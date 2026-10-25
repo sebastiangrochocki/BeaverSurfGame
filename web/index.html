@@ -67,10 +67,11 @@
     <nav>
       <a id="pick-gba" href="?sys=gba">Game Boy Advance</a>
       <a id="pick-gbc" href="?sys=gbc">Game Boy Color</a>
+      <a id="pick-edit" href="editor/">Editor</a>
     </nav>
     <div id="game"></div>
-    <p id="hint-gba">Arrows steer. Z or Space jumps; press again in the air to backflip. Down dives or hugs a downhill face. Land on the downhill side to boost. Enter starts.</p>
-    <p id="hint-gbc">Arrows steer. Z or Space jumps and backflips. Down or X dives. Land on the downhill side to boost. Enter starts.</p>
+    <p id="hint-gba">Arrows steer. Z or Space jumps; press again in the air to backflip, or from the near wave to jump lanes. Double-tap Down to drop to the near wave. Clear the top wave on the way up or wipe out. Down dives. Land on the downhill side to boost. Enter starts, and pauses during play.</p>
+    <p id="hint-gbc">Arrows steer: left brakes, right speeds up. Z, Space, or Up jumps; press it again in the air to backflip, or from the near wave to jump lanes. Double-tap Down or X to drop a lane. Clear the top wave on the way up or wipe out. Down ducks under gulls. Enter starts, and pauses during play.</p>
   </main>
   <script>
     const asked = new URLSearchParams(location.search).get("sys");
@@ -86,7 +87,7 @@
     EJS_color = "#1a5276";
     EJS_startOnLoaded = true;
     EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
-    EJS_gameUrl = sys === "gbc" ? "beaver.gbc?v=29" : "beaver.gba?v=26";
+    EJS_gameUrl = sys === "gbc" ? "beaver.gbc?v=39" : "beaver.gba?v=29";
     EJS_threads = false;
     // EmulatorJS only flushes cartridge SRAM to IndexedDB every 5 minutes or on unload,
     // and the unload path aborts the core before the write settles. Flush often instead.

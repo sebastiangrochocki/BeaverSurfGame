@@ -18,7 +18,7 @@ CFLAGS := -Wf--opt-code-speed -Wf-Isrc -Wf-I$(BUILD)/gen -Wl-j $(CART_FLAGS)
 RULES := src/rules.c src/wave.c src/save.c
 GAME := src/main.c src/render.c src/sound.c
 GEN := $(BUILD)/gen
-ASSETS := $(GEN)/bg.c $(GEN)/bg0.c $(GEN)/beaver.c $(GEN)/board.c $(GEN)/gull.c $(GEN)/ring.c $(GEN)/heart.c $(GEN)/splash.c $(GEN)/arrow.c
+ASSETS := $(GEN)/bg.c $(GEN)/bg0.c $(GEN)/beaver.c $(GEN)/board.c $(GEN)/gull.c $(GEN)/ring.c $(GEN)/heart.c $(GEN)/splash.c $(GEN)/arrow.c $(GEN)/pop.c
 PNGFLAGS := -keep_palette_order -repair_indexed_pal -noflip -bpp 2 -sprite_no_optimize -b 3
 
 .PHONY: all probe clean
@@ -54,6 +54,9 @@ $(GEN)/splash.c: res/splash.png | $(GEN)
 
 $(GEN)/arrow.c: res/arrow.png | $(GEN)
 	$(PNG2ASSET) $< -o $@ -spr8x16 -sw 8 -sh 16 -px 4 -py 0 -sp 0x05 $(PNGFLAGS)
+
+$(GEN)/pop.c: res/pop.png | $(GEN)
+	$(PNG2ASSET) $< -o $@ -spr8x16 -sw 16 -sh 16 -px 8 -py 8 -sp 0x02 $(PNGFLAGS)
 
 $(BUILD)/beaver.gbc: $(RULES) $(GAME) $(ASSETS) src/rules.h src/render.h src/sound.h src/tiles.h | $(BUILD)
 	$(LCC) $(CFLAGS) -o $@ $(RULES) $(GAME) $(ASSETS)

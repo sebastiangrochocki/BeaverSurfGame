@@ -133,7 +133,7 @@ static void steer(uint8_t input) {
         W.beaver.vx = div4((int16_t)(W.beaver.vx * 3));
         if (abs16(W.beaver.vx) < VEL / 16) W.beaver.vx = 0;
     } else {
-        int16_t scale = W.beaver.airborne ? 160 : steer_scale(sea_slope(world_beaver_x()));
+        int16_t scale = W.beaver.airborne ? 160 : steer_scale(lane_slope(world_beaver_x(), W.beaver.lane));
         int16_t accel;
         if ((dir < 0) ? (W.beaver.vx > 0) : (W.beaver.vx < 0)) {
             accel = STEER_ACCEL * 3;
@@ -156,7 +156,8 @@ static void ride(int16_t face, uint8_t input) {
     int16_t accel = slope_accel(face);
     uint8_t right = (input & INPUT_RIGHT) != 0;
     uint8_t dive = (input & INPUT_DIVE) != 0;
-    if (face < 0 && right) accel = div4((int16_t)(accel * 3));
+    /* accel / 2 toward zero; accel is negative here. */
+    if (face < 0 && right) accel = (int16_t)-((int16_t)(-accel) >> 1);
     if (face > 0 && (right || dive)) accel = (int16_t)(accel + PUMP_ACCEL);
     W.speed = (int16_t)(W.speed + accel + div_small((int16_t)(SCROLL_SPEED - W.speed), 40));
     if (W.combo_timer > 0) {
@@ -166,19 +167,27 @@ static void ride(int16_t face, uint8_t input) {
 }
 
 /* Take-off height grows with surf speed, so speed from the last ramp carries into the next. */
-static void launch(const Samples *s, uint8_t input) {
+static void launch(int32_t world_x, uint8_t input) {
     int16_t excess = (int16_t)(W.speed - SCROLL_SPEED);
     int16_t tug = (input & INPUT_RIGHT) ? RIGHT_TUG_VY : 0;
+    Samples s;
     if (excess < 0) excess = 0;
-    W.beaver.perfect = sea_in_top_fifth_s(s);
+    if (W.beaver.lane == LANE_BOTTOM) {
+        W.beaver.perfect = front_in_top_fifth(world_x);
+    } else {
+        sea_sample(world_x, &s);
+        W.beaver.perfect = sea_in_top_fifth_s(&s);
+    }
+    W.beaver.lane_to = W.beaver.lane;
+    W.beaver.cleared = 0;
     W.beaver.air_time = 0;
     W.beaver.rings = 0;
     if (W.beaver.perfect) {
         /* excess is non-negative, so shifts truncate like the divisions. */
-        W.beaver.vy = (int16_t)(JUMP_VY - (int16_t)((int16_t)(excess * 3) >> 3) - tug);
+        W.beaver.vy = (int16_t)(JUMP_VY - (int16_t)((int16_t)(excess * 3) >> 2) - tug);
         W.speed = (int16_t)(W.speed + VEL / 2);
     } else {
-        W.beaver.vy = (int16_t)(EARLY_JUMP_VY - (int16_t)(excess >> 3) - (int16_t)(tug >> 2));
+        W.beaver.vy = (int16_t)(EARLY_JUMP_VY - (int16_t)(excess >> 2) - (int16_t)(tug >> 1));
         W.speed = div4((int16_t)(W.speed * 3));
     }
     if (W.beaver.vy < MAX_JUMP_VY) W.beaver.vy = MAX_JUMP_VY;
@@ -194,10 +203,34 @@ static void splash_at(uint8_t big) {
     W.splash.big = big;
 }
 
-/* Landing on a downhill face is a clean landing: a speed kick and a growing combo. */
-static void land(int16_t face, Events *events) {
+/* Leaves the top lane for the bottom one with a short hop. */
+static void hop_down(void) {
+    W.beaver.lane_to = LANE_BOTTOM;
+    W.beaver.cleared = 0;
+    W.beaver.flip = 0;
+    W.beaver.flips = 0;
+    W.beaver.perfect = 0;
+    W.beaver.air_time = 0;
+    W.beaver.rings = 0;
+    W.beaver.vy = HOP_VY;
+    W.beaver.airborne = 1;
+    W.beaver.y = (int16_t)(W.beaver.y + (W.beaver.vy >> 2));
+}
+
+static void settle(int16_t surface, uint8_t lane) {
+    W.beaver.y = surface;
+    W.beaver.vy = 0;
+    W.beaver.airborne = 0;
+    W.beaver.lane = lane;
+    W.beaver.lane_to = lane;
+    W.beaver.cleared = 0;
+}
+
+/* Landing on a downhill face is a clean landing: a speed kick and a growing combo.
+ * failed is a lane jump that never cleared the top wave. */
+static void land(int16_t face, Events *events, uint8_t failed) {
     uint8_t flips = W.beaver.flips;
-    uint8_t mid_flip = W.beaver.flip > 0;
+    uint8_t mid_flip = (uint8_t)(W.beaver.flip > 0 || failed);
     uint16_t air_points, base;
     uint8_t clean;
     events->landed = 1;
@@ -249,16 +282,17 @@ static void age_splash(int16_t scroll_step) {
     if (W.splash.age >= SPLASH_FRAMES) W.splash.present = 0;
 }
 
-static void spawn(uint8_t *present, Actor *slots, uint8_t count, int16_t x, int16_t y) {
+static uint8_t spawn(uint8_t *present, Actor *slots, uint8_t count, int16_t x, int16_t y) {
     uint8_t i;
     for (i = 0; i < count; i++) {
         if (!present[i]) {
             present[i] = 1;
             slots[i].x = x;
             slots[i].y = y;
-            return;
+            return i;
         }
     }
+    return 0xFF;
 }
 
 /* Next pseudo-random value: xorshift16 after folding in the beaver's position. */
@@ -305,16 +339,18 @@ static void move_actors(int16_t scroll_step) {
         W.rings[i].x = (int16_t)(W.rings[i].x - scroll_step);
         if (W.rings[i].x < PX(-24)) {
             W.ring_present[i] = 0;
+            W.ring_lane[i] = LANE_TOP;
         } else {
-            W.rings[i].y = (int16_t)(sea_at(W.scroll + (int32_t)W.rings[i].x) - RING_LIFT);
+            W.rings[i].y = (int16_t)(lane_surface(W.scroll + (int32_t)W.rings[i].x, W.ring_lane[i]) - RING_LIFT);
         }
     }
     if (W.heart_present) {
         W.heart.x = (int16_t)(W.heart.x - scroll_step);
         if (W.heart.x < PX(-24)) {
             W.heart_present = 0;
+            W.heart_lane = LANE_TOP;
         } else {
-            W.heart.y = (int16_t)(sea_at(W.scroll + (int32_t)W.heart.x) - RING_LIFT);
+            W.heart.y = (int16_t)(lane_surface(W.scroll + (int32_t)W.heart.x, W.heart_lane) - RING_LIFT);
         }
     }
 
@@ -357,16 +393,20 @@ static void move_actors(int16_t scroll_step) {
     if (W.ring_timer == 0) {
         int16_t x = PX(SCREEN_W + 24);
         uint8_t hurt;
+        uint8_t lane = (uint8_t)(roll() & 1);
+        uint8_t slot;
         W.ring_timer = ring_interval(W.tier);
         W.ring_count++;
-        spawn(W.ring_present, W.rings, RING_SLOTS, x,
-              (int16_t)(sea_at(W.scroll + (int32_t)x) - RING_LIFT));
+        slot = spawn(W.ring_present, W.rings, RING_SLOTS, x,
+                     (int16_t)(lane_surface(W.scroll + (int32_t)x, lane) - RING_LIFT));
+        if (slot != 0xFF) W.ring_lane[slot] = lane;
         hurt = W.hearts < START_HEARTS;
         if (hurt && W.ring_count % HEART_EVERY_RINGS == 0 && !W.heart_present) {
             x = (int16_t)(x + HEART_GAP);
             W.heart_present = 1;
+            W.heart_lane = lane;
             W.heart.x = x;
-            W.heart.y = (int16_t)(sea_at(W.scroll + (int32_t)x) - RING_LIFT);
+            W.heart.y = (int16_t)(lane_surface(W.scroll + (int32_t)x, lane) - RING_LIFT);
         }
     }
 }
@@ -391,13 +431,15 @@ static void spawn_gull(int16_t x, int8_t lane, int8_t glide, uint8_t turn) {
     }
 }
 
-static uint8_t touching_gull(void) {
+static uint8_t touching_gull(uint8_t tucked) {
+    int16_t top = tucked ? PX(16) : PX(24);
+    int16_t tall = tucked ? PX(12) : PX(20);
     int16_t bx = (int16_t)(W.beaver.x - PX(8));
-    int16_t by = (int16_t)(W.beaver.y - PX(24));
+    int16_t by = (int16_t)(W.beaver.y - top);
     uint8_t i;
     for (i = 0; i < GULL_SLOTS; i++) {
         if (!W.gull_present[i]) continue;
-        if (overlap(bx, by, PX(16), PX(20), (int16_t)(W.gulls[i].x - PX(10)),
+        if (overlap(bx, by, PX(16), tall, (int16_t)(W.gulls[i].x - PX(10)),
                     (int16_t)(W.gulls[i].y - PX(3)), PX(20), PX(6)))
             return 1;
     }
@@ -422,6 +464,7 @@ static uint8_t through_ring(void) {
         if (abs16((int16_t)(cx - W.rings[i].x)) <= PX(10) &&
             abs16((int16_t)(cy - W.rings[i].y)) <= PX(10)) {
             W.ring_present[i] = 0;
+            W.ring_lane[i] = LANE_TOP;
             scored = 1;
         }
     }
@@ -430,10 +473,13 @@ static uint8_t through_ring(void) {
 
 static void simulate(uint8_t input, Events *events) {
     int16_t scroll_step;
-    uint8_t jump_edge;
+    uint8_t jump_edge, dive_edge, double_down;
     uint8_t stunned;
     Samples s;
-    int16_t surface, face;
+    int16_t surface = 0, face = 0;
+    int32_t world_x;
+    int16_t top;
+    uint8_t lane;
     uint8_t jump = (input & INPUT_JUMP) != 0;
     uint8_t dive = (input & INPUT_DIVE) != 0;
 
@@ -446,6 +492,13 @@ static void simulate(uint8_t input, Events *events) {
     }
     jump_edge = jump && !W.jump_held;
     W.jump_held = jump;
+    dive_edge = (uint8_t)(dive && !W.dive_held);
+    W.dive_held = dive;
+    double_down = (uint8_t)(dive_edge && W.down_tap > 0);
+    if (dive_edge) W.down_tap = DOUBLE_TAP;
+    else if (W.down_tap > 0) W.down_tap--;
+    if (jump_edge) W.up_tap = DOUBLE_TAP;
+    else if (W.up_tap > 0) W.up_tap--;
     if (W.banner_timer > 0) {
         W.banner_timer--;
         if (W.banner_timer == 0) W.banner = BANNER_NONE;
@@ -455,32 +508,79 @@ static void simulate(uint8_t input, Events *events) {
     if (stunned) W.stun--;
     steer(stunned ? 0 : input);
 
-    sea_sample(world_beaver_x(), &s);
-    surface = s.here;
-    face = sea_slope_s(&s);
+    world_x = world_beaver_x();
+    lane = W.beaver.lane;
+    if (lane == LANE_BOTTOM && W.beaver.airborne) {
+        surface = front_at(world_x);
+        face = lane_slope(world_x, LANE_BOTTOM);
+    } else if (lane != LANE_BOTTOM) {
+        sea_sample(world_x, &s);
+        surface = s.here;
+        face = sea_slope_s(&s);
+    }
 
     if (W.beaver.airborne) {
-        if (jump_edge && W.beaver.flip == 0) W.beaver.flip = FLIP_FRAMES;
+        uint8_t climbing, dropping;
+        int16_t bottom;
+        top = sea_at(world_x);
+        if (jump_edge && W.beaver.flip == 0 && W.beaver.lane == W.beaver.lane_to) {
+            if (W.beaver.lane == LANE_BOTTOM) {
+                W.beaver.lane_to = LANE_TOP;
+                W.beaver.cleared = 0;
+            } else {
+                W.beaver.flip = FLIP_FRAMES;
+            }
+        }
         if (W.beaver.flip > 0) {
             W.beaver.flip--;
             if (W.beaver.flip == 0) W.beaver.flips = sat_add8(W.beaver.flips, 1);
         }
         W.beaver.air_time = sat_add16(W.beaver.air_time, 1);
-        W.beaver.vy = (int16_t)(W.beaver.vy + (dive ? DIVE_GRAVITY : GRAVITY));
+        W.beaver.vy = (int16_t)(W.beaver.vy + ((dive && W.beaver.lane == W.beaver.lane_to) ? DIVE_GRAVITY : GRAVITY));
         W.beaver.y = (int16_t)(W.beaver.y + (W.beaver.vy >> 2));
-        if (W.beaver.y >= surface && W.beaver.vy > 0) {
-            W.beaver.y = surface;
-            W.beaver.vy = 0;
-            W.beaver.airborne = 0;
-            land(face, events);
+        climbing = (uint8_t)(W.beaver.lane == LANE_BOTTOM && W.beaver.lane_to == LANE_TOP);
+        if (double_down && W.beaver.lane == LANE_TOP && W.beaver.lane_to == LANE_TOP && W.beaver.vy > 0) {
+            int16_t gap = (int16_t)(top - W.beaver.y);
+            if (gap >= 0 && gap < DROP_WINDOW) W.beaver.lane_to = LANE_BOTTOM;
+        }
+        dropping = (uint8_t)(W.beaver.lane == LANE_TOP && W.beaver.lane_to == LANE_BOTTOM);
+        bottom = front_at(world_x);
+        if (climbing && W.beaver.y < top) W.beaver.cleared = 1;
+        if (climbing && W.beaver.cleared && W.beaver.y >= top && W.beaver.vy > 0) {
+            settle(top, LANE_TOP);
+            land(sea_slope(world_x), events, 0);
+        } else if (dropping && W.beaver.y >= bottom && W.beaver.vy > 0) {
+            settle(bottom, LANE_BOTTOM);
+            land(lane_slope(world_x, LANE_BOTTOM), events, 0);
+        } else if (climbing && !W.beaver.cleared && W.beaver.y >= bottom && W.beaver.vy > 0) {
+            settle(bottom, LANE_BOTTOM);
+            land(lane_slope(world_x, LANE_BOTTOM), events, 1);
+        } else if (!dropping && !climbing && W.beaver.y >= surface && W.beaver.vy > 0) {
+            settle(surface, lane);
+            land(face, events, 0);
         }
     } else {
+        uint8_t allowed;
+        int8_t meter;
+        if (lane == LANE_BOTTOM) {
+            FrontRide ride;
+            front_ride(world_x, &ride);
+            surface = ride.surface;
+            face = ride.slope;
+            allowed = ride.allowed;
+            meter = ride.meter;
+        } else {
+            allowed = sea_jump_allowed_s(&s);
+            meter = sea_jump_meter_s(&s);
+        }
         W.beaver.y = surface;
         W.beaver.vy = 0;
         ride(face, input);
-        glide_meter(sea_jump_meter_s(&s));
-        if (jump && !stunned && sea_jump_allowed_s(&s)) {
-            launch(&s, input);
+        glide_meter(meter);
+        if (!stunned && double_down && lane == LANE_TOP) {
+            hop_down();
+        } else if (jump && !stunned && allowed) {
+            launch(world_x, input);
             events->jumped = 1;
         }
     }
@@ -490,7 +590,7 @@ static void simulate(uint8_t input, Events *events) {
     move_actors(scroll_step);
     if (W.invuln > 0) {
         W.invuln--;
-    } else if (W.phase == PHASE_PLAY && touching_gull()) {
+    } else if (W.phase == PHASE_PLAY && touching_gull((uint8_t)(dive && W.beaver.flip == 0 && !double_down))) {
         events->hit = 1;
         lose_half_heart(events);
     }
@@ -501,6 +601,7 @@ static void simulate(uint8_t input, Events *events) {
     }
     if (touching_heart()) {
         W.heart_present = 0;
+        W.heart_lane = LANE_TOP;
         W.hearts = (uint8_t)(W.hearts + 1);
         if (W.hearts > START_HEARTS) W.hearts = START_HEARTS;
         show(BANNER_HEART, 0, 0, 0);
@@ -582,12 +683,17 @@ void world_encode(uint8_t *out) BANKED {
     *p++ = W.beaver.perfect;
     p = put16(p, W.beaver.air_time);
     *p++ = W.beaver.rings;
+    *p++ = W.beaver.lane;
+    *p++ = W.beaver.lane_to;
+    *p++ = W.beaver.cleared;
 
     for (i = 0; i < GULL_SLOTS; i++) p = put_actor(p, W.gull_present[i], &W.gulls[i]);
     for (i = 0; i < GULL_SLOTS; i++) p = put16(p, (uint16_t)W.gull_vy[i]);
     for (i = 0; i < GULL_SLOTS; i++) *p++ = W.gull_turn[i];
     for (i = 0; i < RING_SLOTS; i++) p = put_actor(p, W.ring_present[i], &W.rings[i]);
+    for (i = 0; i < RING_SLOTS; i++) *p++ = W.ring_lane[i];
     p = put_actor(p, W.heart_present, &W.heart);
+    *p++ = W.heart_lane;
     p = put16(p, W.ring_count);
 
     *p++ = W.splash.present;
@@ -615,5 +721,8 @@ void world_encode(uint8_t *out) BANKED {
     p = put16(p, W.ring_timer);
     *p++ = W.start_held;
     *p++ = W.jump_held;
+    *p++ = W.dive_held;
+    *p++ = W.down_tap;
+    *p++ = W.up_tap;
     p = put16(p, W.rng);
 }

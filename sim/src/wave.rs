@@ -56,6 +56,13 @@ pub fn amplitude2_half(tier: u8) -> u16 {
     6 + 2 * tier.min(8) as u16
 }
 
+/// Bottom-lane height as sixteenths of the top wave's swing: 5/16 to start, one more
+/// sixteenth every second tier, 8/16 from tier 6. The front steepens over time on top of
+/// the table amplitude it already inherits.
+pub fn front_scale(tier: u8) -> i16 {
+    5 + (tier.min(6) / 2) as i16
+}
+
 pub fn sin8(angle: u16) -> i16 {
     SIN8[(angle & 255) as usize] as i16
 }
@@ -121,16 +128,12 @@ pub fn refresh_table(tick: u32, tier: u8, out: &mut [i16; TABLE_LEN]) {
     }
 }
 
-/// Closer, faster foreground wave drawn in front of the main wave. Render only.
-pub fn front_height(phase_px: u16, tick: u32, tier: u8) -> i16 {
-    let phase = phase_px & 511;
-    let (amp_mod, lift) = envelope((phase + 96 + (tick & 511) as u16) & 511);
-    let base_half = 10 + 2 * tier.min(8) as u16;
-    let amp = ((base_half * amp_mod as u16) >> 8) as i16;
-    let primary = (amp * sin8(angle(phase, 4, tick, 4))) >> 2;
-    let chop = (6 * sin8(angle(phase, 8, tick, 5))) >> 2;
-    FRONT_HORIZON + primary + chop + lift / 3
-}
+/// Top lane. The beaver starts here.
+pub const LANE_TOP: u8 = 0;
+/// Bottom lane: the near wave, stretched and shortened from the same height table.
+pub const LANE_BOTTOM: u8 = 1;
+/// World pixels added before the half-speed sample, so the bottom wave is not a copy of the top.
+pub const FRONT_PHASE: i16 = 128;
 
 /// Steer multiplier in Q8. 256 is full speed, 128 is the 50% minimum.
 pub fn steer_scale(slope: i16) -> i16 {
@@ -141,23 +144,30 @@ pub fn steer_scale(slope: i16) -> i16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sea {
     pub heights: [i16; TABLE_LEN],
+    /// `front_scale` of the tier the table was last refreshed for.
+    pub front_num: i16,
 }
 
 impl Sea {
     pub fn new(tick: u32, tier: u8) -> Self {
         let mut heights = [HORIZON; TABLE_LEN];
         build_table(tick, tier, &mut heights);
-        Self { heights }
+        Self {
+            heights,
+            front_num: front_scale(tier),
+        }
     }
 
     /// Recomputes every entry for `tick`.
     pub fn rebuild(&mut self, tick: u32, tier: u8) {
         build_table(tick, tier, &mut self.heights);
+        self.front_num = front_scale(tier);
     }
 
     /// Advances the table by one tick: a quarter of the entries catch up with `tick`.
     pub fn refresh(&mut self, tick: u32, tier: u8) {
         refresh_table(tick, tier, &mut self.heights);
+        self.front_num = front_scale(tier);
     }
 
     /// Height at an integer world pixel.
@@ -175,9 +185,58 @@ impl Sea {
         self.at_px(((world_x >> 6) & 511) as i16)
     }
 
+    /// Bottom-lane height at an integer world pixel.
+    /// `FRONT_HORIZON + ((sea((x >> 1) + FRONT_PHASE) - HORIZON) * front_num >> 4)`.
+    /// Twice as long as the top wave and `front_scale` sixteenths as tall. The Game Boy
+    /// front ramps slope by at most ±4 px per column; the painter clamps the rare rest.
+    pub fn front_at_px(&self, world_px: i32) -> i16 {
+        let sample = (world_px >> 1).wrapping_add(FRONT_PHASE as i32);
+        let delta = self.at_px(sample as i16) - HORIZON;
+        FRONT_HORIZON + ((delta as i32 * self.front_num as i32) >> 4) as i16
+    }
+
+    /// Bottom-lane height at a Q10.6 world position.
+    pub fn front_at(&self, world_x: i32) -> i16 {
+        self.front_at_px(world_x >> 6)
+    }
+
+    /// Left, here and right bottom-lane heights, 8 px apart.
+    pub fn front_sample(&self, world_x: i32) -> (i16, i16, i16) {
+        let px = world_x >> 6;
+        (
+            self.front_at_px(px - 8),
+            self.front_at_px(px),
+            self.front_at_px(px + 8),
+        )
+    }
+
+    /// Screen-Y difference of the bottom lane across 16 pixels.
+    pub fn front_slope(&self, world_x: i32) -> i16 {
+        let (left, _, right) = self.front_sample(world_x);
+        right - left
+    }
+
+    /// Height of `lane` at a Q10.6 world position.
+    pub fn surface(&self, world_x: i32, lane: u8) -> i16 {
+        if lane == LANE_BOTTOM {
+            self.front_at(world_x)
+        } else {
+            self.at(world_x)
+        }
+    }
+
     /// Screen-Y difference across 16 pixels. Positive means the water is lower on the right.
     pub fn slope(&self, world_x: i32) -> i16 {
         self.at(world_x + px(8) as i32) - self.at(world_x - px(8) as i32)
+    }
+
+    /// Slope of whichever lane the beaver is riding.
+    pub fn lane_slope(&self, world_x: i32, lane: u8) -> i16 {
+        if lane == LANE_BOTTOM {
+            self.front_slope(world_x)
+        } else {
+            self.slope(world_x)
+        }
     }
 
     pub fn is_crest(&self, world_x: i32) -> bool {
@@ -250,6 +309,98 @@ impl Sea {
         } else {
             (64 + self.descent_progress(world_x) * 32 / 257) as i8
         }
+    }
+
+    pub fn front_is_crest(&self, world_x: i32) -> bool {
+        let (left, here, right) = self.front_sample(world_x);
+        here < left && here < right
+    }
+
+    pub fn front_is_trough(&self, world_x: i32) -> bool {
+        let (left, here, right) = self.front_sample(world_x);
+        here > left && here > right
+    }
+
+    pub fn front_jump_allowed(&self, world_x: i32) -> bool {
+        if self.front_is_trough(world_x) {
+            return false;
+        }
+        self.front_is_crest(world_x) || self.front_slope(world_x) < 0
+    }
+
+    /// True on a bottom-lane crest or in the top fifth of the climb toward it.
+    pub fn front_in_top_fifth(&self, world_x: i32) -> bool {
+        if self.front_is_crest(world_x) {
+            return true;
+        }
+        self.front_slope(world_x) < 0 && self.front_climb(world_x) >= 204
+    }
+
+    pub fn front_jump_meter(&self, world_x: i32) -> i8 {
+        let climbing = self.front_jump_allowed(world_x);
+        if climbing && self.front_in_top_fifth(world_x) {
+            let top = self.front_climb(world_x).max(204) - 204;
+            (32 + (top * 32 / 52).min(31)) as i8
+        } else if climbing {
+            (self.front_climb(world_x) * 32 / 204).min(31) as i8
+        } else if self.front_is_trough(world_x) || self.front_slope(world_x) < 0 {
+            0
+        } else {
+            (64 + self.front_descent(world_x) * 32 / 257) as i8
+        }
+    }
+
+    pub fn lane_jump_allowed(&self, world_x: i32, lane: u8) -> bool {
+        if lane == LANE_BOTTOM {
+            self.front_jump_allowed(world_x)
+        } else {
+            self.jump_allowed(world_x)
+        }
+    }
+
+    pub fn lane_in_top_fifth(&self, world_x: i32, lane: u8) -> bool {
+        if lane == LANE_BOTTOM {
+            self.front_in_top_fifth(world_x)
+        } else {
+            self.in_top_fifth(world_x)
+        }
+    }
+
+    pub fn lane_jump_meter(&self, world_x: i32, lane: u8) -> i8 {
+        if lane == LANE_BOTTOM {
+            self.front_jump_meter(world_x)
+        } else {
+            self.jump_meter(world_x)
+        }
+    }
+
+    fn front_climb(&self, world_x: i32) -> i16 {
+        let here = self.front_at(world_x);
+        let crest = self.front_walk(world_x, 1, true);
+        let trough = self.front_walk(world_x, -1, false);
+        fraction(trough - here, trough - crest)
+    }
+
+    fn front_descent(&self, world_x: i32) -> i16 {
+        let here = self.front_at(world_x);
+        let crest = self.front_walk(world_x, -1, true);
+        let trough = self.front_walk(world_x, 1, false);
+        fraction(here - crest, trough - crest)
+    }
+
+    /// Follows the bottom lane in 8 px steps while it keeps rising or falling.
+    fn front_walk(&self, world_x: i32, dir: i16, seek_crest: bool) -> i16 {
+        let start = world_x >> 6;
+        let mut prev = self.front_at_px(start);
+        for step in 1..=20i32 {
+            let next = self.front_at_px(start + dir as i32 * step * 8);
+            let keep = if seek_crest { next < prev } else { next > prev };
+            if !keep {
+                break;
+            }
+            prev = next;
+        }
+        prev
     }
 }
 
@@ -355,5 +506,60 @@ mod tests {
         assert!(sea.in_top_fifth(crest));
         assert!(!sea.in_top_fifth(trough));
         assert!((0..=96).contains(&sea.jump_meter(crest)));
+    }
+
+    #[test]
+    fn the_bottom_lane_is_the_top_wave_stretched_and_shortened() {
+        assert_eq!(front_scale(0), 5);
+        assert_eq!(front_scale(1), 5);
+        assert_eq!(front_scale(2), 6);
+        assert_eq!(front_scale(6), 8);
+        assert_eq!(front_scale(8), 8);
+        for tier in 0..=8 {
+            let sea = Sea::new(40, tier);
+            assert_eq!(sea.front_num, front_scale(tier));
+            for x in 0..WAVE_PERIOD_PX {
+                let sample = sea.at_px((x >> 1) + FRONT_PHASE) - HORIZON;
+                let expect =
+                    FRONT_HORIZON + ((sample as i32 * front_scale(tier) as i32) >> 4) as i16;
+                assert_eq!(sea.front_at_px(x as i32), expect, "tier {tier} x {x}");
+            }
+            // A screen column is 12 world px. Front tiles slope by ±4 and the painter clamps
+            // the rest, so steps past that must stay rare and never run away.
+            let mut steepest = 0i16;
+            let mut clamped = 0;
+            for x in 0..WAVE_PERIOD_PX {
+                let dy = (sea.front_at_px(x as i32 + 12) - sea.front_at_px(x as i32)).abs();
+                steepest = steepest.max(dy);
+                if dy > px(4) {
+                    clamped += 1;
+                }
+            }
+            assert!(
+                steepest <= px(6),
+                "tier {tier} front column step {steepest} is too steep to clamp"
+            );
+            assert!(
+                clamped * 100 <= WAVE_PERIOD_PX as i32 * 8,
+                "tier {tier}: {clamped} of {WAVE_PERIOD_PX} front columns need clamping"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bottom_lane_has_a_crest_and_a_meter() {
+        let sea = Sea::new(11, 1);
+        let crest = (0..WAVE_PERIOD_PX * 2)
+            .map(|x| px(x) as i32)
+            .find(|x| sea.front_is_crest(*x))
+            .expect("front crest");
+        assert!(sea.front_jump_allowed(crest));
+        assert!(sea.front_in_top_fifth(crest));
+        assert!((0..=96).contains(&sea.front_jump_meter(crest)));
+        assert_eq!(sea.lane_jump_meter(crest, LANE_TOP), sea.jump_meter(crest));
+        assert_eq!(
+            sea.lane_jump_meter(crest, LANE_BOTTOM),
+            sea.front_jump_meter(crest)
+        );
     }
 }

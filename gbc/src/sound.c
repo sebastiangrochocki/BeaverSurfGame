@@ -145,6 +145,14 @@ static void play(uint8_t ch, uint8_t note) {
     }
 }
 
+/* Cuts the sustained voices when the game pauses; the next note-on brings each one back. */
+void sound_pause(void) {
+    melody_note(0);
+    NR22_REG = 0x08;
+    NR24_REG = 0x80;
+    bass_note(0);
+}
+
 /* Once per rules step. Advances every track by one frame; a channel a cue is using skips its
  * note-on but still counts, so the band stays in time. */
 void sound_tick(void) {

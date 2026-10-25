@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use beaver_sim::trace::{STATE_LEN, trace_header};
-use beaver_sim::{Events, Input, Phase, Sea, VEL, World, encode_save, px, tier};
+use beaver_sim::{
+    Events, Input, LANE_BOTTOM, LANE_TOP, Phase, Sea, VEL, World, encode_save, px, tier,
+};
 
 const TITLE_FRAMES: u32 = 20;
 const OVER_FRAMES: u32 = 10;
@@ -26,6 +28,7 @@ enum Style {
     RingRun,
     HeartPickup,
     GullDeath,
+    LaneHopper,
 }
 
 struct Script {
@@ -34,7 +37,7 @@ struct Script {
     play_frames: u32,
 }
 
-const SCRIPTS: [Script; 8] = [
+const SCRIPTS: [Script; 9] = [
     Script {
         name: "idle",
         style: Style::Idle,
@@ -74,6 +77,11 @@ const SCRIPTS: [Script; 8] = [
         name: "gull_death",
         style: Style::GullDeath,
         play_frames: 9000,
+    },
+    Script {
+        name: "lane_hopper",
+        style: Style::LaneHopper,
+        play_frames: 3600,
     },
 ];
 
@@ -133,6 +141,10 @@ struct Player {
     /// Hold pattern chosen by the planner for the current jump.
     plan: Option<(Input, bool)>,
     wiped_once: bool,
+    /// Lane-hopper script step.
+    phase: u8,
+    saw_top: bool,
+    saw_wipe: bool,
 }
 
 impl Player {
@@ -142,7 +154,14 @@ impl Player {
             flip_armed: false,
             plan: None,
             wiped_once: false,
+            phase: 0,
+            saw_top: false,
+            saw_wipe: false,
         }
+    }
+
+    fn satisfied(&self) -> bool {
+        self.style != Style::LaneHopper || (self.saw_top && self.saw_wipe)
     }
 
     fn jump_now(&mut self, world: &World, want: impl Fn(Events) -> bool) -> Option<Input> {
@@ -274,8 +293,173 @@ impl Player {
                 }
                 Input::default()
             }
+            Style::LaneHopper => self.lane_input(world),
         }
     }
+
+    /// Hops down, lane-jumps back up once a crest will clear, then wipes out on a short one.
+    fn lane_input(&mut self, world: &World) -> Input {
+        let right = Input {
+            right: true,
+            ..Input::default()
+        };
+        let jump = Input {
+            jump: true,
+            right: true,
+            ..Input::default()
+        };
+        let dive = Input {
+            dive: true,
+            right: true,
+            ..Input::default()
+        };
+        let ahead = world.beaver_world_x() + (world.speed >> 2) as i32;
+        let next = Sea::new(world.tick + 1, tier(world.tick + 1));
+        match self.phase {
+            0 => {
+                self.phase = 1;
+                dive
+            }
+            1 => {
+                self.phase = 2;
+                right
+            }
+            2 => {
+                self.phase = 3;
+                dive
+            }
+            3 => {
+                if !world.beaver.airborne && world.beaver.lane == LANE_BOTTOM {
+                    self.phase = 4;
+                }
+                right
+            }
+            4 => {
+                if world.beaver.airborne || world.stun > 0 {
+                    return right;
+                }
+                if clears_top(world) {
+                    self.phase = 5;
+                    return jump;
+                }
+                right
+            }
+            5 => {
+                self.phase = 6;
+                right
+            }
+            6 => {
+                self.phase = 7;
+                jump
+            }
+            7 => {
+                if world.beaver.airborne {
+                    return right;
+                }
+                if world.beaver.lane == LANE_TOP && world.stun == 0 {
+                    self.saw_top = true;
+                    self.phase = 8;
+                } else {
+                    self.phase = 4;
+                }
+                right
+            }
+            8 => {
+                self.phase = 9;
+                dive
+            }
+            9 => {
+                self.phase = 10;
+                right
+            }
+            10 => {
+                self.phase = 11;
+                dive
+            }
+            11 => {
+                if !world.beaver.airborne && world.beaver.lane == LANE_BOTTOM {
+                    self.phase = 12;
+                }
+                right
+            }
+            12 => {
+                if world.beaver.airborne || world.stun > 0 {
+                    return Input::default();
+                }
+                if next.lane_jump_allowed(ahead, LANE_BOTTOM)
+                    && !next.lane_in_top_fifth(ahead, LANE_BOTTOM)
+                {
+                    self.phase = 13;
+                    return Input {
+                        jump: true,
+                        ..Input::default()
+                    };
+                }
+                Input::default()
+            }
+            13 => {
+                if !world.beaver.airborne {
+                    self.phase = 12;
+                    return Input::default();
+                }
+                let top = world.sea.at(world.beaver_world_x());
+                if world.beaver.y < top {
+                    self.phase = 16;
+                    return Input::default();
+                }
+                if world.beaver.vy > 0 {
+                    self.phase = 14;
+                    return Input {
+                        jump: true,
+                        ..Input::default()
+                    };
+                }
+                Input::default()
+            }
+            16 => {
+                if !world.beaver.airborne {
+                    self.phase = 12;
+                }
+                Input::default()
+            }
+            14 => {
+                if world.stun > 0 {
+                    self.saw_wipe = true;
+                    self.phase = 15;
+                } else if !world.beaver.airborne {
+                    self.phase = 12;
+                }
+                Input::default()
+            }
+            _ => Input::default(),
+        }
+    }
+}
+
+/// True when jumping now, then jumping again, lands on the top lane.
+fn clears_top(world: &World) -> bool {
+    let mut copy = *world;
+    let jump = Input {
+        jump: true,
+        right: true,
+        ..Input::default()
+    };
+    let right = Input {
+        right: true,
+        ..Input::default()
+    };
+    if !copy.step(jump).jumped {
+        return false;
+    }
+    copy.step(right);
+    copy.step(jump);
+    for _ in 0..180 {
+        if !copy.beaver.airborne || copy.phase != Phase::Play {
+            break;
+        }
+        copy.step(right);
+    }
+    copy.beaver.lane == LANE_TOP && !copy.beaver.airborne && copy.stun == 0
 }
 
 fn record(file: &mut Vec<u8>, input: Input, world: &World) {
@@ -285,7 +469,7 @@ fn record(file: &mut Vec<u8>, input: Input, world: &World) {
     file.extend_from_slice(&state);
 }
 
-fn run(script: &Script) -> (Vec<u8>, Tally, u32) {
+fn run(script: &Script) -> (Vec<u8>, Tally, u32, bool) {
     let mut world = World::new();
     let mut body = Vec::new();
     let mut tally = Tally::default();
@@ -321,6 +505,7 @@ fn run(script: &Script) -> (Vec<u8>, Tally, u32) {
         let input = player.input(&world);
         step(&mut world, input, &mut body, &mut tally);
     }
+    let played = player.satisfied();
 
     if world.phase == Phase::Over {
         for frame in 0..OVER_FRAMES + AFTER_FRAMES {
@@ -340,7 +525,7 @@ fn run(script: &Script) -> (Vec<u8>, Tally, u32) {
 
     let mut file = trace_header(frames).to_vec();
     file.extend_from_slice(&body);
-    (file, tally, frames)
+    (file, tally, frames, played)
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -352,7 +537,7 @@ fn main() {
     fs::create_dir_all(&dir).expect("fixtures dir");
     let mut ok = true;
     for script in &SCRIPTS {
-        let (file, tally, frames) = run(script);
+        let (file, tally, frames, played) = run(script);
         let path = dir.join(format!("{}.trace", script.name));
         fs::write(&path, &file).expect("write trace");
         let expected = match script.style {
@@ -363,6 +548,7 @@ fn main() {
             Style::RingRun => tally.rings > 0,
             Style::HeartPickup => tally.hearts > 0,
             Style::GullDeath => tally.deaths == 1,
+            Style::LaneHopper => played && tally.wipeouts > 0 && tally.jumps > 0,
         };
         println!(
             "{:<14} {:>5} frames  jumps {:>3} clean {:>3} tricks {:>3} wipeouts {:>2} rings {:>3} hearts {:>2} hits {:>2} deaths {}{}",

@@ -7,7 +7,7 @@
 use crate::{Actor, Banner, Phase, Splash, World};
 
 /// Size of one encoded state record.
-pub const STATE_LEN: usize = 116;
+pub const STATE_LEN: usize = 126;
 
 /// Trace file: `BVRT`, version, state length, two reserved bytes, frame count (u32),
 /// then one record per frame: the input bits fed to `step`, followed by the state after it.
@@ -136,6 +136,9 @@ impl World {
         w.bool(b.perfect);
         w.u16(b.air_time);
         w.u8(b.rings);
+        w.u8(b.lane);
+        w.u8(b.lane_to);
+        w.bool(b.cleared);
 
         for gull in self.gulls {
             w.actor(gull);
@@ -149,7 +152,11 @@ impl World {
         for ring in self.rings {
             w.actor(ring);
         }
+        for lane in self.ring_lane {
+            w.u8(lane);
+        }
         w.actor(self.heart_pickup);
+        w.u8(self.heart_lane);
         w.u16(self.ring_count);
         w.splash(self.splash);
 
@@ -182,6 +189,9 @@ impl World {
         w.u16(self.ring_timer);
         w.bool(self.start_held);
         w.bool(self.jump_held);
+        w.bool(self.dive_held);
+        w.u8(self.down_tap);
+        w.u8(self.up_tap);
         w.u16(self.rng);
         debug_assert_eq!(w.at, STATE_LEN);
     }

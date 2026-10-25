@@ -50,7 +50,7 @@ const BG: [[[u8; 3]; 4]; 8] = [
 
 /// Sprite palettes. Colour 0 is transparent. `sprite_pals` in render.c repeats these in RGB555.
 const SP: [[[u8; 3]; 4]; 6] = [
-    [[0, 0, 0], [0, 0, 0], [156, 90, 60], [153, 0, 48]],        // beaver: ink, fur, maroon
+    [[0, 0, 0], [0, 0, 0], [100, 45, 11], [70, 13, 30]],        // beaver: ink, fur, maroon
     [[0, 0, 0], [48, 40, 32], [255, 255, 255], [255, 160, 32]],  // gull
     [[0, 0, 0], [140, 80, 8], [248, 188, 32], [255, 236, 140]], // ring
     [[0, 0, 0], [120, 16, 24], [232, 48, 56], [255, 255, 255]], // heart
@@ -58,20 +58,29 @@ const SP: [[[u8; 3]; 4]; 6] = [
     [[0, 0, 0], [8, 32, 72], [232, 48, 56], [255, 255, 255]],   // arrow
 ];
 
-const BASE_TILES: usize = 81;
+const BASE_TILES: usize = 70;
 /// Ramps fill VRAM bank 1 above the base tiles first; the rest go to bank 0 above the sprite
 /// patterns (render.c checks the sprite sheets really end at BANK0_RAMP_BASE).
 const BANK1_RAMP_MAX: usize = 256 - BASE_TILES;
-const BANK0_RAMP_BASE: usize = 166;
+const BANK0_RAMP_BASE: usize = 194;
 const BANK0_RAMP_MAX: usize = 256 - BANK0_RAMP_BASE;
 /// Eleven pixels per column covers the steepest faces; twelve would cost 24 more tiles for a
 /// one-pixel difference and bank 0 is shared with the sprite sheets.
 const RAMP_DY_MIN: i32 = -11;
 const RAMP_DY_MAX: i32 = 11;
-/// The front echo swings a quarter as far as the main wave, so its columns never need the
-/// steep ramps; two pixels per column keeps the set small enough for bank 0.
-const FRONT_DY_MIN: i32 = -2;
-const FRONT_DY_MAX: i32 = 2;
+/// The bottom lane is half as tall as the main wave at most and twice as long, so its
+/// columns never need the steep ramps; four pixels per column covers all but a few percent
+/// of its columns at the top tiers and the painter clamps those.
+const FRONT_DY_MIN: i32 = -4;
+const FRONT_DY_MAX: i32 = 4;
+
+/// Ramps are drawn for even slopes only; an odd slope borrows the tile one pixel flatter and
+/// the missing pixel lands at the tile edge, where the next column starts from its own
+/// height anyway. A one-pixel-per-tile line looks the same either way, and it halves the
+/// ramp set, which is what pays for the dashed echoes under the crest.
+fn even_slope(dy: i32) -> i32 {
+    dy - dy % 2
+}
 const RAMP_SUB_MIN: i32 = -8;
 const RAMP_SUB_MAX: i32 = 15;
 
@@ -261,11 +270,11 @@ pub fn write(root: &Path) {
 
     write_tiles_header(&root.join("src/tiles.h"), ramps.tiles.len(), bank1, scene_base);
 
-    let beaver = beaver_sheet();
+    let beaver = beaver_sheet(root);
     beaver.check("beaver", 1);
     beaver.write_indexed(&res.join("beaver.png"), &SP[0..1]);
 
-    let board = board_sheet();
+    let board = board_sheet(root);
     board.check("board", 1);
     board.write_indexed(&res.join("board.png"), &SP[0..1]);
 
@@ -284,6 +293,10 @@ pub fn write(root: &Path) {
     let splash = splash_sheet();
     splash.check("splash", 1);
     splash.write_indexed(&res.join("splash.png"), &SP[4..5]);
+
+    let pop = pop_sheet();
+    pop.check("pop", 1);
+    pop.write_indexed(&res.join("pop.png"), &SP[2..3]);
 
     let arrow = arrow_sheet();
     arrow.check("arrow", 1);
@@ -323,15 +336,9 @@ fn tileset(ramps: &[Img]) -> Img {
     sheet.blit_tile(64, &face_tile());
     sheet.blit_tile(65, &body_tile());
     sheet.blit_tile(66, &deep_tile());
-    sheet.blit_tile(67, &curl_tile(0));
-    sheet.blit_tile(68, &curl_tile(1));
-    sheet.blit_tile(69, &spray_tile(0));
-    sheet.blit_tile(70, &spray_tile(1));
-    for sub in 0..8 {
-        sheet.blit_tile(71 + sub, &front_line(sub));
-    }
-    sheet.blit_tile(79, &front_face());
-    sheet.blit_tile(80, &front_body_tile());
+    sheet.blit_tile(67, &spray_tile(0));
+    sheet.blit_tile(68, &spray_tile(1));
+    sheet.blit_tile(69, &front_body_tile());
     for (index, tile) in ramps.iter().enumerate() {
         sheet.blit_tile(BASE_TILES + index, tile);
     }
@@ -357,11 +364,26 @@ struct Ramps {
     front_lut: Vec<u8>,
 }
 
+/// Where the white falls in a wave column: the crest is two solid rows, and under it the
+/// line repeats as dashes, each repeat one pixel further down the face and one pixel to the
+/// right, the way the contour lines stack in the old Pikachu surfing minigame. `below` is
+/// the row's distance under the crest's lower row. Returns 2 for the crest, 1 for a dash,
+/// 0 for plain water.
+fn surf_white(x: i32, below: i32) -> u8 {
+    match below {
+        -1 | 0 => 2,
+        2 if (x + 1).rem_euclid(4) < 2 => 1,
+        4 if (x + 2).rem_euclid(4) < 2 => 1,
+        _ => 0,
+    }
+}
+
 /// Diagonal foam. `sub` is the line's row at the left edge (it may sit outside the tile) and
 /// `dy` is how many rows it rises or falls by the right edge. Rows above the line are sky
-/// (colour 0), the line is two rows of foam (colour 1) and everything below is lit face
-/// (colour 2, the same blue as face_tile); a column the line passes below is all sky and a
-/// column it passes above is all face, so a steep face stays a steep face.
+/// (colour 0), the crest is two rows of foam (colour 1) over lit face (colour 2, the same
+/// blue as face_tile) with the dashed echoes of surf_white in it; a column the line passes
+/// below is all sky and a column it passes above is all face, so a steep face stays a steep
+/// face.
 fn ramp_from_edges(sub: i32, dy: i32) -> Img {
     let mut tile = solid(LINE, 0);
     for x in 0..8i32 {
@@ -369,7 +391,7 @@ fn ramp_from_edges(sub: i32, dy: i32) -> Img {
         for y in 0..8i32 {
             let col = if y < surface - 1 {
                 0
-            } else if y <= surface {
+            } else if surf_white(x, y - surface) != 0 {
                 1
             } else {
                 2
@@ -382,17 +404,17 @@ fn ramp_from_edges(sub: i32, dy: i32) -> Img {
 
 /// Front-wave crest in the water palette. Above the line the tile carries on the lowest main
 /// water row (deep_tile's ripples on the lit base) so the two waves read as one body of water;
-/// the line is a white crest with a lit row under it, and below is the shadowed near face that
-/// front_body_tile() continues to the bottom of the screen.
+/// the line is a two-row white crest with a lit row under it, then the shadowed near face
+/// that front_body_tile() continues to the bottom of the screen, with the same dashed
+/// echoes as the main wave cut into it.
 fn front_ramp_from_edges(sub: i32, dy: i32) -> Img {
     let mut tile = solid(WATER, 2);
     for x in 0..8i32 {
-        let jag = if x % 3 == 0 { -1 } else { 0 };
-        let surface = sub + (dy * x) / 8 + jag;
+        let surface = sub + (dy * x) / 8;
         for y in 0..8i32 {
-            let col = if y < surface {
+            let col = if y < surface - 1 {
                 if (x * 3 + y * 2) % 5 == 0 { 1 } else { 2 }
-            } else if y == surface {
+            } else if surf_white(x, y - surface) != 0 {
                 3
             } else if y == surface + 1 {
                 2
@@ -440,7 +462,7 @@ fn build_ramps() -> Ramps {
     let mut lut = Vec::new();
     for dy in RAMP_DY_MIN..=RAMP_DY_MAX {
         for sub in RAMP_SUB_MIN..=RAMP_SUB_MAX {
-            lut.push(intern(ramp_from_edges(sub, dy)));
+            lut.push(intern(ramp_from_edges(sub, even_slope(dy))));
         }
     }
     assert!(tiles.len() <= 256, "main ramp ids overflow a byte ({})", tiles.len());
@@ -449,7 +471,9 @@ fn build_ramps() -> Ramps {
     let mut front_lut = Vec::new();
     for dy in FRONT_DY_MIN..=FRONT_DY_MAX {
         for sub in RAMP_SUB_MIN..=RAMP_SUB_MAX {
-            let tile = front_ramp_from_edges(sub, dy);
+            // Odd samples reuse the even tile above them. The front crest then steps two
+            // pixels at a time, which frees the tiles for the nose-up and nose-down boards.
+            let tile = front_ramp_from_edges(sub & !1, even_slope(dy));
             let id = *front_seen.entry(tile.pixels.clone()).or_insert_with(|| {
                 front_tiles.push(tile);
                 (front_tiles.len() - 1) as u8
@@ -458,6 +482,12 @@ fn build_ramps() -> Ramps {
         }
     }
     assert_eq!(lut.len() % sub_count, 0);
+    println!(
+        "gbc ramps: {} main, {} front, {} in bank 0 with the scenery",
+        tiles.len(),
+        front_tiles.len(),
+        tiles.len().saturating_sub(BANK1_RAMP_MAX) + front_tiles.len() + 14
+    );
     Ramps {
         tiles,
         lut,
@@ -708,23 +738,6 @@ fn deep_tile() -> Img {
     water_tile(5, 1)
 }
 
-fn curl_tile(frame: usize) -> Img {
-    let mut tile = solid(LINE, 0);
-    for x in 0..8i32 {
-        let lip = 2 + ((x as usize + frame * 3) % 4) as i32 / 2;
-        if lip > 0 {
-            tile.set(x, lip - 1, LINE, 1);
-        }
-        tile.set(x, lip, LINE, 1);
-        tile.set(x, lip + 1, LINE, 2);
-        tile.set(x, lip + 2, LINE, 2);
-        for y in lip + 3..8 {
-            tile.set(x, y, LINE, if (x + y) % 2 == 0 { 3 } else { 2 });
-        }
-    }
-    tile
-}
-
 fn spray_tile(frame: usize) -> Img {
     let mut tile = solid(LINE, 0);
     let drops: [(i32, i32); 8] = [
@@ -746,255 +759,110 @@ fn spray_tile(frame: usize) -> Img {
     tile
 }
 
-fn front_line(sub: usize) -> Img {
-    let mut tile = solid(WATER, 0);
-    for x in 0..8i32 {
-        let jag = if x % 3 == 0 { -1 } else { 0 };
-        let foam = (sub as i32 + jag).clamp(0, 7);
-        for y in 0..8i32 {
-            let col = if y < foam {
-                if y == foam - 1 && x % 2 == 0 { 1 } else { 0 }
-            } else if y == foam {
-                3
-            } else if y == foam + 1 {
-                2
-            } else {
-                1
-            };
-            tile.set(x, y, WATER, col);
-        }
+/// Seven 32x32 frames from `gbc/art`: surf, tug, jump, flip, flip turned 90° backwards,
+/// brake left, and drive right. The other three flip steps are this 90° frame and the upright
+/// flip frame with both OAM mirrors, which is a half turn.
+fn beaver_sheet(root: &Path) -> Img {
+    let mut sheet = Img::new(32 * 7, 32, true);
+    let art = root.join("art");
+    let flip = load_pose(&art.join("flip.png"));
+    let poses = [
+        load_pose(&art.join("surf.png")),
+        load_pose(&art.join("tug.png")),
+        load_pose(&art.join("jump.png")),
+        flip.clone(),
+        rotate_ccw(&flip),
+        load_pose(&art.join("left.png")),
+        load_pose(&art.join("right.png")),
+    ];
+    for (frame, pose) in poses.iter().enumerate() {
+        blit_pose(&mut sheet, frame, pose);
     }
-    tile
-}
-
-fn front_face() -> Img {
-    let mut tile = solid(WATER, 1);
-    for x in 0..8i32 {
-        tile.set(x, 0, WATER, 3);
-        tile.set(x, 1, WATER, 2);
-        if x % 2 == 0 {
-            tile.set(x, 2, WATER, 2);
-        }
-        if x % 3 == 1 {
-            tile.set(x, 5, WATER, 0);
-        }
-    }
-    tile
-}
-
-/// Five 32x32 frames. The resting and crouching beaver are cut above the board (rows 0-23),
-/// which is drawn separately so it can tilt and float alone. The flip frames keep the board:
-/// the mid-roll is hand drawn, the two quarter turns are the whole resting frame rotated, so
-/// the backflip reads as one surfer going round.
-fn beaver_sheet() -> Img {
-    let mut sheet = Img::new(32 * 5, 32, true);
-    let idle = stamp_pose(BEAVER_IDLE);
-    blit_frame(&mut sheet, 0, &body_only(&idle));
-    blit_frame(&mut sheet, 1, &body_only(&stamp_pose(BEAVER_TUCK)));
-    blit_frame(&mut sheet, 2, &rotate_backwards(&idle));
-    blit_frame(&mut sheet, 3, &stamp_pose(BEAVER_ROLL));
-    blit_frame(&mut sheet, 4, &rotate_forwards(&idle));
     sheet
 }
 
-/// Three 32x16 board frames cut from the resting drawing: flat, nose up and nose down. The
-/// flat board sits at rows BOARD_LIFT..BOARD_LIFT+8 so the tilted ends have room.
-fn board_sheet() -> Img {
-    let mut sheet = Img::new(32 * 3, 16, true);
-    let idle = stamp_pose(BEAVER_IDLE);
-    for x in 0..32 {
-        // Nose up lifts the right end two pixels and the middle one; nose down mirrors it.
-        let tilt = (x * 3 / 32) as i32;
-        for y in BOARD_TOP..32 {
-            let pixel = idle.pixels[y * 32 + x];
-            if pixel == TRANS {
+fn load_pose(path: &Path) -> Vec<u8> {
+    load_rgba(path, 32, 32)
+}
+
+fn load_rgba(path: &Path, width: u32, height: u32) -> Vec<u8> {
+    let file = fs::File::open(path).unwrap_or_else(|err| panic!("open {}: {err}", path.display()));
+    let decoder = png::Decoder::new(file);
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    assert_eq!((info.width, info.height), (width, height), "{}", path.display());
+    assert_eq!(info.color_type, png::ColorType::Rgba, "{}", path.display());
+    buf[..info.buffer_size()].to_vec()
+}
+
+/// Quarter turn counter-clockwise: a right-facing beaver rotates backwards.
+fn rotate_ccw(src: &[u8]) -> Vec<u8> {
+    let mut dst = vec![0u8; 32 * 32 * 4];
+    for y in 0..32 {
+        for x in 0..32 {
+            let sx = 31 - y;
+            let sy = x;
+            let from = (sy * 32 + sx) * 4;
+            let to = (y * 32 + x) * 4;
+            dst[to..to + 4].copy_from_slice(&src[from..from + 4]);
+        }
+    }
+    dst
+}
+
+fn blit_pose(sheet: &mut Img, frame: usize, rgba: &[u8]) {
+    let ox = frame as i32 * 32;
+    for y in 0..32 {
+        for x in 0..32 {
+            let i = (y * 32 + x) * 4;
+            let pixel = &rgba[i..i + 4];
+            if pixel[3] == 0 {
                 continue;
             }
-            let row = (y - BOARD_TOP) as i32 + BOARD_LIFT;
-            sheet.set(x as i32, row, 0, pixel & 3);
-            sheet.set((32 + x) as i32, row - tilt, 0, pixel & 3);
-            sheet.set((64 + x) as i32, row + tilt, 0, pixel & 3);
+            let col = match (pixel[0], pixel[1], pixel[2]) {
+                (0, 0, 0) => 1,
+                (100, 45, 11) => 2,
+                (70, 13, 30) => 3,
+                other => panic!("beaver pixel {other:?} at {x},{y}"),
+            };
+            sheet.set(ox + x as i32, y as i32, 0, col);
+        }
+    }
+}
+
+/// Three 32x16 boards: flat, nose up, nose down. Flat stays under the cruise poses.
+fn board_sheet(root: &Path) -> Img {
+    let mut sheet = Img::new(32 * 3, 16, true);
+    let art = root.join("art");
+    for (frame, name) in ["board.png", "board_up.png", "board_down.png"].iter().enumerate() {
+        let rgba = load_rgba(&art.join(name), 32, 16);
+        let ox = frame as i32 * 32;
+        for y in 0..16 {
+            for x in 0..32 {
+                let i = (y * 32 + x) * 4;
+                let pixel = &rgba[i..i + 4];
+                if pixel[3] == 0 {
+                    continue;
+                }
+                let col = match (pixel[0], pixel[1], pixel[2]) {
+                    (0, 0, 0) => 1,
+                    (70, 13, 30) => 3,
+                    other => panic!("board pixel {other:?} at {x},{y}"),
+                };
+                // The top seven rows of every frame are blank. Pack the deck to the top of the
+                // cell so those rows are not sprites sitting across the beaver's belly.
+                let dy = y as i32 - 7;
+                if dy < 0 {
+                    continue;
+                }
+                sheet.set(ox + x as i32, dy, 0, col);
+            }
         }
     }
     sheet
 }
 
-/// Quarter turn backwards of a square frame: for a right-facing surfer the nose goes up and
-/// back.
-fn rotate_backwards(src: &Img) -> Img {
-    let n = src.width;
-    assert_eq!(src.height, n, "rotation needs a square frame");
-    let mut dst = Img::new(n, n, true);
-    for y in 0..n {
-        for x in 0..n {
-            dst.pixels[y * n + x] = src.pixels[x * n + (n - 1 - y)];
-        }
-    }
-    dst
-}
-
-/// Quarter turn forwards: the last step of the flip, nose coming back down.
-fn rotate_forwards(src: &Img) -> Img {
-    let n = src.width;
-    assert_eq!(src.height, n, "rotation needs a square frame");
-    let mut dst = Img::new(n, n, true);
-    for y in 0..n {
-        for x in 0..n {
-            dst.pixels[y * n + x] = src.pixels[(n - 1 - x) * n + y];
-        }
-    }
-    dst
-}
-
-/// The board is the bottom eight rows of the surfing drawings.
-const BOARD_TOP: usize = 24;
-/// Rows of empty space above the flat board in the board sheet (render.c offsets the block).
-const BOARD_LIFT: i32 = 2;
-
-fn body_only(src: &Img) -> Img {
-    let mut dst = Img::new(src.width, src.height, true);
-    let to = BOARD_TOP * src.width;
-    dst.pixels[..to].copy_from_slice(&src.pixels[..to]);
-    dst
-}
-
-fn stamp_pose(art: &str) -> Img {
-    let mut img = Img::new(32, 32, true);
-    let rows: Vec<&str> = art.lines().filter(|line| !line.is_empty()).collect();
-    assert_eq!(rows.len(), 32, "pose height");
-    for (y, row) in rows.iter().enumerate() {
-        assert_eq!(row.chars().count(), 32, "pose width line {y}");
-        for (x, ch) in row.chars().enumerate() {
-            let col = match ch {
-                'o' => 1,
-                'f' => 2,
-                'c' => 3,
-                '.' => continue,
-                other => panic!("bad pixel {other}"),
-            };
-            img.set(x as i32, y as i32, 0, col);
-        }
-    }
-    img
-}
-
-// Hand-drawn frames: o outline, f fur, c maroon (paw, heart, claws, the roll's belly). The
-// beaver faces right with the board along the bottom rows.
-const BEAVER_IDLE: &str = "
-................................
-................................
-...........ooooo......oooo......
-...........offfooooooooffoo.....
-...........offoofffffffffffo....
-...........offfffffffffffffo....
-...........offfffooooffoooofo...
-..........offffffoffoffoffofo...
-..........offfffffffffffffffo...
-.........ooffffffffffffooofffo..
-.........offfffffffffffooooffo..
-........ooffffffffffffoooooffo..
-.oooooooofffffffffffffofofoffoo.
-oofffffoffffffffffffffofofofoco.
-offfffccoffffoooffffffofofofoco.
-offcccccofffoccfofffffofofofoco.
-ofccccccofffoccfoffffffooofffoo.
-occcccccofffocffofffffffffffffo.
-occcccccofffoofoofffffffffffffo.
-.occccccoffffooofffffffffffffoo.
-.oooccccoffffffffffffffffffffo..
-...ooocooffffffffffffffffffooo..
-.....ooooffffffffffffffffooccoo.
-...oooooooooofffffffffffocffofoo
-.oofffooocccooofffffffoooooofffo
-oofffffoocffccooffffooooooofffoo
-oofffffocfcffffoooooooffffffffoo
-offffffocffffffooooofffffffffoo.
-oofffffoocfffooffffffffffffooo..
-ooofffffoooooffffffffoooooooo...
-.oooooooooooooooooooooooooo.....
-..ooooooooooooooooooooooo.......
-";
-
-/// Crouched low with the paws forward: Down held, or dropping out of a jump.
-const BEAVER_TUCK: &str = "
-...........oooooo....oooo.......
-...........offfoooooooffo.......
-...........offfffffffffffo......
-...........offffffffffffffo.....
-..........oofffffooooffooofo....
-..........offffffoffoffofffo....
-.........offffffffffffffffffo...
-.........offffffffffffffffffo...
-........oofffffffffffffoooffo...
-...oooo.offffffffffffffooofffo..
-..offffoofffffffffffffofofoffo..
-..offfffofffffffffffffofofoffo..
-.oofffffofffffffffffffofofoffoo.
-.offffffoffffoooffffffofofofoco.
-.offffccofffofffoffffffoooffoco.
-.ofcccccofffoccfoffffffffffffco.
-.occccccofffoccfofffffffffffffo.
-.occccccoffffoooffffffffffffffo.
-.oocccccofffffffffffffffffffffo.
-..ooccccoffffffffffffffffffffoo.
-...oocccoffffffffffffffffffffooo
-....oocooffffffffffffffffffooooo
-......oooffffffffffffffffooccooo
-....ooooooooofffffffffffocccofoo
-...oooooccccoooooooooooooooofffo
-.ooffffoccffccooooffffffffffffoo
-oofffffocfcfffofffffffffffffffo.
-fffffffoooffooofffffffffffffoo..
-offffffffoooofffffffffffffooo...
-ooffffffffffffffffffffooooo.....
-.ooooofffffffffffffoooooo.......
-....oooooooooooooooooo..........
-";
-
-/// Halfway round the backflip.
-const BEAVER_ROLL: &str = "
-.......oooooooooooooo...........
-......oofffffoooffffoooo........
-..oooooffffffoffffffocfo........
-.oofoffffoofffffffffooooo.......
-.offffffoofffffoofffffffoo......
-.ofoffffofffffoooofffffffoo.....
-.ofoffffffffffoooooofffooooooo..
-..ooffffffffffoooffoffocccccooo.
-...offffffffffffoooofoccccccccoo
-...offfffffffffffoffocccccccccoo
-...offfffffffffffffoccccccccccco
-...offffffffffffffocccccccccccco
-...offfffffffffffoocccccccccccco
-...offfffffffoooooccccccccccccco
-...oofffffffoffcocccccccccccccco
-....offfffffoccoocccccccccccccco
-....ooffffffoccoccccccccccccccco
-.....ooffffffoooccccccccccccccco
-......offfffffocccccccccccccccoo
-......ooffffffocccccccccccccccoo
-....oooooooooocccccccccccccccoo.
-...oofcccccccocccccccccccccccoo.
-.oooffccccccooccccccccccccccco..
-ooffffccccccocccccccccccccccoo..
-offffffcccccoccccccccccccccoo...
-offffffffffcocccccccccccccco....
-offffffffffcocccccccccccccoo....
-offffffffooooccccccccccccoo.....
-oofffffooo..occccccccccooo......
-.ooooooo....ooccccccccooo.......
-.............ooocccccoo.........
-.............ooooooooo..........
-";
-
-fn blit_frame(sheet: &mut Img, frame: usize, src: &Img) {
-    let ox = frame * src.width;
-    for y in 0..src.height {
-        for x in 0..src.width {
-            sheet.pixels[y * sheet.width + ox + x] = src.pixels[y * src.width + x];
-        }
-    }
-}
 
 /// Turns fur pixels that touch transparency into the dark outline.
 fn add_outline(img: &mut Img) {
@@ -1113,6 +981,9 @@ fn paint_gull(img: &mut Img, ox: i32, art: &str) {
 
 fn ring_sheet() -> Img {
     let mut img = Img::new(24, 32, true);
+    // Nine rows down. The blank tail then sits above the ring, and the renderer lifts the
+    // sprite by the same amount so the picture stays put and does not cover the beaver.
+    const DROP: i32 = 9;
     for y in 0..24i32 {
         for x in 0..24i32 {
             let dx = x - 11;
@@ -1126,13 +997,13 @@ fn ring_sheet() -> Img {
                 } else {
                     2
                 };
-                img.set(x, y, 0, col);
+                img.set(x, y + DROP, 0, col);
             }
         }
     }
-    img.set(7, 4, 0, 3);
-    img.set(8, 4, 0, 3);
-    img.set(8, 5, 0, 3);
+    img.set(7, 4 + DROP, 0, 3);
+    img.set(8, 4 + DROP, 0, 3);
+    img.set(8, 5 + DROP, 0, 3);
     img
 }
 
@@ -1155,10 +1026,45 @@ fn heart_sheet() -> Img {
 }
 
 fn splash_sheet() -> Img {
-    let mut sheet = Img::new(64, 16, true);
-    paint_splash(&mut sheet, 0, false);
-    paint_splash(&mut sheet, 32, true);
+    let mut sheet = Img::new(32, 16, true);
+    paint_splash(&mut sheet, 0, true);
     sheet
+}
+
+/// Two 16x16 frames: the shrunken hoop, then the droplets it bursts into.
+fn pop_sheet() -> Img {
+    let mut img = Img::new(32, 16, true);
+    stamp_hoop(&mut img, 0, 7, 7, 6, 3);
+    let specks = [(2, 2), (12, 1), (1, 12), (13, 12), (7, 0), (8, 14), (0, 6), (15, 7)];
+    for (i, (x, y)) in specks.iter().enumerate() {
+        let col = if i % 2 == 0 { 3 } else { 2 };
+        img.set(16 + x, *y, 0, col);
+        if *y + 1 < 16 {
+            img.set(16 + x, y + 1, 0, 1);
+        }
+    }
+    img
+}
+
+fn stamp_hoop(img: &mut Img, ox: i32, cx: i32, cy: i32, outer: i32, inner: i32) {
+    for y in 0..16 {
+        for x in 0..16 {
+            let dx = x - cx;
+            let dy = y - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 < inner * inner || d2 > outer * outer {
+                continue;
+            }
+            let col = if d2 > (outer - 1) * (outer - 1) {
+                1
+            } else if dy < -1 {
+                3
+            } else {
+                2
+            };
+            img.set(ox + x, y, 0, col);
+        }
+    }
 }
 
 fn paint_splash(img: &mut Img, ox: i32, big: bool) {
@@ -1323,21 +1229,13 @@ fn scenery_tiles() -> Vec<Img> {
         ],
         key,
     );
-    let city_b = ascii_tile(
-        sea(),
-        [
-            "........", "....l...", ".ll.ll..", ".ll.ll.l", "gggggggg", "gggggggg", "gggggggg",
-            "gggggggg",
-        ],
-        key,
-    );
     let land_top_r = mirror(&land_top_l);
     let land_r = mirror(&land_l);
     let hill6_r = mirror(&hill6_l);
     let hill7_r = mirror(&hill7_l);
     vec![
         land_top, land, land_top_l, land_top_r, land_l, land_r, hill6_l, hill6_r, hill7_l, hill7_r,
-        spire, tower_mid, tower_base, city_a, city_b,
+        spire, tower_mid, tower_base, city_a,
     ]
 }
 
@@ -1367,12 +1265,9 @@ fn write_tiles_header(path: &Path, ramp_count: usize, bank1_ramps: usize, scene_
 #define TILE_FACE       64
 #define TILE_BODY       65
 #define TILE_ABYSS      66
-#define TILE_CURL       67
-#define TILE_SPRAY      69
-#define TILE_FRONT_LINE 71
-#define TILE_FRONT_FACE 79
-#define TILE_FRONT_DEEP 80
-#define TILE_RAMP       81
+#define TILE_SPRAY      67
+#define TILE_FRONT_DEEP 69
+#define TILE_RAMP       70
 #define TILE_RAMP_COUNT {ramp_count}
 #define TILE_RAMP1_COUNT {bank1_ramps}
 #define TILE_RAMP0      {bank0_base}
@@ -1394,7 +1289,7 @@ fn write_tiles_header(path: &Path, ramp_count: usize, bank1_ramps: usize, scene_
 #define SC_TOWER_MID    (TILE_SCENE + 11)
 #define SC_TOWER_BASE   (TILE_SCENE + 12)
 #define SC_CITY_A       (TILE_SCENE + 13)
-#define SC_CITY_B       (TILE_SCENE + 14)
+#define SC_CITY_B       SC_CITY_A
 
 /* Background palette index for every tile, matching the indexed PNG palette order. */
 #define PAL_HUD 0
