@@ -185,6 +185,18 @@ impl Image {
 mod gbc;
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--gbc-pickups-only") {
+        gbc::write_pickups(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gbc"));
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--gbc-actors-only") {
+        gbc::write_actors(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gbc"));
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--gbc-only") {
+        gbc::write(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../gbc"));
+        return;
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("gba");

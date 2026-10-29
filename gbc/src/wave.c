@@ -278,6 +278,7 @@ rqm_look:
 #endif
 
 static void refresh_quarter(uint8_t quarter) {
+    uint8_t i;
     rq_index = quarter;
     rq_dst = world.heights + quarter;
     /* Entry index i has phase 8i: angle bytes advance by 32, 64 and 16 per step of four. */
@@ -302,6 +303,10 @@ static void refresh_quarter(uint8_t quarter) {
         rq_shifted = (uint16_t)(rq_shifted + 32) & 511;
     }
 #endif
+    if(world.wave_scale<16) {
+        for(i=quarter;i<TABLE_LEN;i+=4)
+            world.heights[i]=(int16_t)(HORIZON+((world.heights[i]-HORIZON)>>4)*world.wave_scale);
+    }
 }
 
 static void prepare(uint32_t tick, uint8_t tier) {
@@ -866,6 +871,14 @@ void front_ride(int32_t world_x, FrontRide *out) BANKED {
     out->slope = slope_of(&s);
     out->allowed = (uint8_t)(!trough_of(&s) && (crest_of(&s) || slope_of(&s) < 0));
     out->meter = front_meter_of(world_x, &s);
+}
+/* Identical physical samples/permission without the player's display-only meter walk. */
+void front_motion(int32_t world_x,FrontRide *out) BANKED {
+    Samples s;
+    front_sample(world_x,&s);
+    out->surface=s.here;out->slope=slope_of(&s);
+    out->allowed=(uint8_t)(!trough_of(&s) && (crest_of(&s) || slope_of(&s)<0));
+    out->meter=0;
 }
 
 int16_t lane_surface(int32_t world_x, uint8_t lane) BANKED {

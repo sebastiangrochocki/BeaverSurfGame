@@ -29,8 +29,9 @@ WORLD_BYTES = 128
 
 # Sprite tile ranges from render.c, after the generated sheets.
 TILE_BEAVER = range(0, 112)
+TILE_BOARD = range(112, 136)
 TILE_GULL = range(136, 160)
-TILE_RING = range(160, 172)
+TILE_RING = range(160, 164)
 TILE_HEART = range(172, 176)
 
 # Packed World layout. heights_at_117 in render.c fails the ROM build if this moves.
@@ -126,6 +127,8 @@ def oam(mem):
 def kind(tile):
     if tile in TILE_BEAVER:
         return "beaver"
+    if tile in TILE_BOARD:
+        return "board"
     if tile in TILE_GULL:
         return "gull"
     if tile in TILE_RING:
@@ -161,6 +164,10 @@ def buttons(frame):
     # A few frames apart, so a loop that samples twice and then waits still sees the release.
     if cycle in (30, 36, 90, 96):
         held.add("b")
+    if cycle in (51,111):
+        held.add("down")
+    if cycle in (58,120):
+        held.add("up")
     if cycle in (50, 58, 110, 120):
         held.add("a")
     if cycle == 70:
@@ -216,6 +223,14 @@ def main():
         pyboy.tick()
     pyboy.button_release("start")
     pyboy.tick()
+    # Reach the surf before exercising A/B: A near the new beach shop is an
+    # intentional enter interaction, not a jump.
+    pyboy.button_press("right")
+    for _ in range(300):
+        pyboy.tick()
+        if mem[world+PHASE]==PHASE_PLAY:break
+    pyboy.button_release("right")
+    assert mem[world+PHASE]==PHASE_PLAY,"did not walk into the surf"
 
     for frame in range(FRAMES):
         held = buttons(frame)
@@ -232,7 +247,8 @@ def main():
             break
 
         sprites = counted(oam(mem))
-        peak, line = scanline_peak(sprites)
+        # Count every OAM object, including the overlapping deck and effects.
+        peak, line = scanline_peak(oam(mem))
         if peak > 10:
             problems.append(f"frame {frame}: scanline {line} has {peak} beaver/gull/ring/heart sprites")
             break
@@ -275,8 +291,8 @@ def main():
                 break
         else:
             for rx, _ry in actors(RING_PRESENT, RINGS, 3, 4)[:2]:
-                left = view_x(rx >> 6) - 12
-                if 0 <= left and left + 24 <= 160 and 0 < boxed("ring", left, 24) < 6:
+                left = view_x(rx >> 6) - 8
+                if 0 <= left and left + 16 <= 160 and boxed("ring", left, 16) == 1:
                     problems.append(f"frame {frame}: a ring is sliced")
                     break
             else:
@@ -291,10 +307,16 @@ def main():
         stun = seen[world + STUN]
         airborne = seen[world + BEAVER_AIR]
         beaver_sprites = [sprite for sprite in sprites if kind(sprite[2]) == "beaver"]
+        boards = [sprite for sprite in sprites if kind(sprite[2]) == "board"]
+        if beaver_sprites and min(s[2] for s in beaver_sprites) // 16 not in (3, 4):
+            if 16 <= view_x(i16(seen, world + 10) >> 6) <= 144 and len(boards) != 4:
+                problems.append(f"frame {frame}: overlapping board is not whole ({len(boards)} cells)")
+                break
         if stun == 0 and not airborne and beaver_sprites:
             # beaver.y is the lane surface while grounded. The lower 8x16 row is queued
             # at feet - 15, and OAM stores that plus 16.
-            feet_oam = max(sprite[0] for sprite in beaver_sprites)
+            # The lower body and deck share a composited row on normal rides.
+            feet_oam = max(sprite[0] for sprite in beaver_sprites + boards)
             surface = i16(seen, world + BEAVER_Y)
             want = ((surface >> 6) - VIEW_LIFT) + 1
             if abs(feet_oam - want) > 2:
@@ -304,7 +326,7 @@ def main():
                 break
 
     dropped = u16(mem, dropped_addr) - (play_drops or 0)
-    pyboy.stop()
+    pyboy.stop(save=False)
 
     if dropped != 0:
         problems.append(f"frames_dropped is {dropped}")

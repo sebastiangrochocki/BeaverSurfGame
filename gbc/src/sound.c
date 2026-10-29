@@ -69,6 +69,12 @@ static void noise(uint8_t shape, uint8_t envelope) {
 }
 
 void sound_events(const Events *events) {
+    if(events->countdown) {
+        NR21_REG=0x80;NR22_REG=0xC2;
+        NR23_REG=events->countdown==4?0xD0:0x80;
+        NR24_REG=events->countdown==4?0x87:0x86;
+        hold[CH_HARMONY]=HOLD_PING;
+    }
     if (events->wipeout || events->hit) {
         noise(0x6B, 0xF1);
         hold[CH_DRUMS] = HOLD_NOISE;

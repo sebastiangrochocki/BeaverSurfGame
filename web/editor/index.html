@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sprite editor — Beaver Surf</title>
-  <link rel="stylesheet" href="editor.css">
+  <title>GBC Art Workspace — Beaver Surf</title>
+  <link rel="preload" href="opensans/OpenSans.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="workspace.css?v=28">
+  <link rel="stylesheet" href="editor.css?v=28">
 </head>
 <body>
   <header>
@@ -13,22 +15,97 @@
       <a href="../?sys=gbc">Game Boy Color</a>
       <a class="on" href="./">Editor</a>
     </nav>
-    <p class="hint">Pick a size, draw with the brush, then Clone frame for the next pose. Keys 1–4 choose a color. [ and ] change frame. Export PNG downloads an indexed sheet.</p>
+    <p class="hint">Art workspace <span>Sprites · Tiles · Linked scenes</span></p>
+    <div id="project-actions" class="row"></div>
   </header>
   <div class="app">
+    <aside class="library">
+      <h2 class="library-title">Asset library</h2>
+      <div id="workspace-modes" class="row mode-tabs">
+        <button type="button" data-mode="sprite" class="on">Sprites</button>
+        <button type="button" data-mode="tile">Tiles</button>
+        <button type="button" data-mode="scene">Scenes</button>
+      </div>
+      <div class="row"><select id="asset-list"></select><button id="asset-add" type="button">＋</button><button id="asset-dup" type="button">Clone</button></div>
+      <input id="asset-name" type="text" maxlength="40" autocomplete="off">
+      <button id="asset-delete" type="button">Delete asset</button>
+      <h2 id="tile-library-title" class="library-title" hidden>Tile stamp library</h2>
+      <div id="tile-library" hidden></div>
+      <div id="scene-controls" class="scene-tools" hidden>
+        <h2 class="library-title">Scene placement</h2>
+        <div class="row"><button id="layer-tiles" type="button" class="on">Tiles layer</button><button id="layer-pixels" type="button">Pixels layer</button></div>
+        <p id="selected-tile" class="selection-note">Selected tile: Blank tile</p>
+        <h3>Rotation</h3>
+        <div class="row"><button id="rotate-0" type="button" class="on">0°</button><button id="rotate-90" type="button">90°</button><button id="rotate-180" type="button">180°</button><button id="rotate-270" type="button">270°</button></div>
+        <button id="scene-erase" type="button">Erase tile stamp</button>
+      </div>
+    </aside>
     <div class="swatches" id="swatches"></div>
     <div class="stage">
       <div class="toolbar">
         <button type="button" id="tool-draw" class="on">Brush</button>
         <button type="button" id="tool-fill">Fill</button>
         <button type="button" id="tool-pick">Pick</button>
+        <button type="button" id="erase">Eraser</button>
+        <button type="button" id="tool-select">Select</button>
+        <button type="button" id="tool-recolor" hidden>Recolor</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
         <button type="button" id="undo">Undo</button>
         <button type="button" id="redo">Redo</button>
       </div>
+      <div id="brush-settings" class="brush-settings">
+        <label><span id="brush-palette-label">Brush palette</span><select id="brush-palette" aria-label="Brush palette"></select></label>
+      </div>
+      <p id="brush-help" class="selection-note"></p>
+      <div id="selection-reflect" hidden>
+        <div class="row" role="group" aria-label="Flip selection">
+          <button type="button" id="reflect-horizontal" title="Mirror the entire selection left ↔ right">Flip horizontal</button>
+          <button type="button" id="reflect-vertical" title="Mirror the entire selection top ↔ bottom">Flip vertical</button>
+          <span class="selection-note">Flip the whole selection</span>
+        </div>
+        <div class="row" role="group" aria-label="Mirror clone selection">
+          <span>Mirror clone</span>
+          <button type="button" id="reflect-left-right" title="Clone left half onto right half, keeping the left">Left → right</button>
+          <button type="button" id="reflect-right-left" title="Clone right half onto left half, keeping the right">Right → left</button>
+          <button type="button" id="reflect-top-bottom" title="Clone top half onto bottom half, keeping the top">Top → bottom</button>
+          <button type="button" id="reflect-bottom-top" title="Clone bottom half onto top half, keeping the bottom">Bottom → top</button>
+          <span class="selection-note">Copy one half for symmetry</span>
+        </div>
+        <p class="selection-note">Indexed pixels · full 8×8 cells carry palettes</p>
+      </div>
+      <div class="canvas-view-options">
+        <label id="tile-scale-label" class="tile-scale">Drawing scale
+          <select id="tile-scale"><option value="fit" selected>Fit</option><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option><option value="custom" disabled>Custom zoom</option></select>
+        </label>
+        <button type="button" id="fit-view" title="Fit artwork to viewport">Fit</button>
+        <label id="onion-label" class="onion-toggle"><input id="onion" type="checkbox" aria-label="Onion skin" checked> Onion skin <span class="selection-note">Previous frame</span></label>
+        <span class="selection-note" title="Hold Space and drag, middle-drag, or scroll inside the artboard to pan">Space-drag to pan</span>
+      </div>
       <div class="viewport" id="viewport"><canvas id="view"></canvas></div>
+      <div id="tile-previews" class="tile-previews" hidden>
+        <div id="pattern-wrap" class="pattern-wrap" hidden>
+          <div class="tile-preview-heading"><h3>Repeating tile preview</h3><p class="selection-note">Click or drag to draw directly into the tile.</p></div>
+          <canvas id="pattern-view" width="160" height="144"></canvas>
+        </div>
+        <section id="palette-animation-preview" class="palette-animation-preview" aria-labelledby="palette-animation-title">
+          <div class="tile-preview-heading"><h3 id="palette-animation-title">Palette animation</h3><p class="selection-note">Preview only · uses the current tile pixels and live palettes.</p></div>
+          <canvas id="palette-animation-view" width="160" height="144" role="img" aria-label="Tile palette animation preview"></canvas>
+          <div class="row palette-playback-controls">
+            <button id="palette-play" type="button" aria-label="Play palette animation">Play</button>
+            <label class="palette-preview-rate">FPS <input id="palette-fps" type="number" min="1" max="30" value="2" aria-label="Palette animation FPS"></label>
+            <span id="palette-frame-status" class="selection-note" aria-live="off"></span>
+          </div>
+          <div id="palette-frames" class="palette-frames" role="group" aria-label="Palette animation frames"></div>
+          <div class="row">
+            <button id="palette-clone" type="button">Clone palette frame</button>
+            <button id="palette-drop" type="button">Delete palette frame</button>
+          </div>
+        </section>
+      </div>
       <div class="frames" id="frames"></div>
-      <div class="row">
+      <div class="row" id="frame-actions">
         <button type="button" id="clone">Clone frame</button>
+        <button type="button" id="blank-frame">Blank frame</button>
         <button type="button" id="copy-png">Copy PNG</button>
         <button type="button" id="play">Play</button>
         <button type="button" id="drop-frame">Delete frame</button>
@@ -56,16 +133,20 @@
         </select>
       </label>
 
-      <h2>Palette</h2>
+      <h2>Palette library</h2>
+      <p class="selection-note palette-warning">Choosing a palette affects new stamps. Editing its colors updates artwork using that palette.</p>
       <div class="row" id="pal-tabs"></div>
       <label>Name
         <input id="pal-name" type="text" maxlength="24" autocomplete="off">
       </label>
       <div class="sliders" id="sliders">
-        <label>Red <input id="ch-r" type="range" min="0" max="31" value="0"></label>
-        <label>Green <input id="ch-g" type="range" min="0" max="31" value="0"></label>
-        <label>Blue <input id="ch-b" type="range" min="0" max="31" value="0"></label>
+        <label>Red <input id="ch-r" type="range" min="0" max="255" value="0"></label>
+        <label>Green <input id="ch-g" type="range" min="0" max="255" value="0"></label>
+        <label>Blue <input id="ch-b" type="range" min="0" max="255" value="0"></label>
       </div>
+      <label>Hex color
+        <div class="hex-editor"><input id="hex-input" type="text" inputmode="text" maxlength="7" placeholder="#65B8CC"><button type="button" id="hex-apply">Apply</button></div>
+      </label>
       <label>Presets
         <select id="preset"></select>
       </label>
@@ -76,7 +157,7 @@
       </div>
       <button type="button" id="pal-save">Remember this palette</button>
 
-      <h2>Frame</h2>
+      <h2 id="asset-settings-title">Sprite</h2>
       <label>Size
         <select id="size">
           <option value="8x8">8×8 tile</option>
@@ -85,6 +166,7 @@
           <option value="24x32">24×32 ring</option>
           <option value="32x16">32×16 board</option>
           <option value="32x32" selected>32×32 beaver</option>
+          <option value="64x64">64×64</option>
           <option value="custom">Custom</option>
         </select>
       </label>
@@ -97,26 +179,33 @@
         <span id="zoom-label">12×</span>
         <button type="button" id="zoom-in">+</button>
       </div>
-      <label class="row"><input id="onion" type="checkbox" checked> Onion skin of the previous frame</label>
+      <label id="fps-label">Animation FPS <input id="fps" type="number" min="1" max="30" value="8"></label>
+      <label id="scene-size-label" hidden>Scene size
+        <select id="scene-size"><option value="160x144">160×144 screen</option><option value="256x256">256×256 map</option><option value="custom">Custom</option></select>
+      </label>
+      <div id="scene-size-custom" class="row" hidden><label>Width <input id="scene-width" type="number" min="8" max="1024" step="8" value="160"></label><label>Height <input id="scene-height" type="number" min="8" max="1024" step="8" value="144"></label></div>
+      <label id="screen-preview-label" class="row" hidden><input id="screen-preview" type="checkbox" checked> Show 160×144 screen</label>
 
       <h2>File</h2>
       <label>File name
         <input id="file-name" type="text" value="sprite" maxlength="40" autocomplete="off">
       </label>
       <div class="row">
-        <button type="button" id="file-new">New</button>
-        <button type="button" id="file-open">Open</button>
-        <button type="button" id="file-save">Save</button>
+        <button type="button" id="file-new">New project</button>
+        <button type="button" id="file-open">Import project</button>
+        <button type="button" id="file-save-now">Save</button>
+        <button type="button" id="file-save">Export project</button>
       </div>
       <div class="row">
         <button type="button" id="file-import">Import PNG</button>
         <button type="button" id="file-export">Export PNG</button>
+        <button type="button" id="file-gbc">GBC bundle</button>
       </div>
       <input id="file-input" type="file" accept=".json,.png,application/json,image/png" hidden>
       <h2>This 8×8 cell</h2>
       <pre id="hex"></pre>
     </div>
   </div>
-  <script src="editor.js"></script>
+  <script src="workspace.js?v=28"></script>
 </body>
 </html>

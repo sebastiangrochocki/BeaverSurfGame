@@ -27,30 +27,30 @@ const BG: [[[u8; 3]; 4]; 8] = [
         [176, 216, 240],
     ], // cloud
     [
-        [20, 88, 156],
+        [18, 77, 114],
         [56, 168, 64],
         [220, 184, 112],
         [72, 164, 208],
     ], // island / far sea
-    [[20, 88, 156], [255, 255, 255], [128, 72, 36], [208, 40, 48]], // ship
+    [[18, 77, 114], [255, 255, 255], [128, 72, 36], [208, 40, 48]], // ship
     [
         [96, 176, 224],
         [255, 184, 24],
         [255, 228, 128],
         [255, 255, 255],
     ], // sun
-    [[4, 20, 56], [12, 64, 128], [48, 156, 212], [240, 252, 255]], // water
+    [[18, 77, 114], [36, 125, 163], [101, 184, 204], [228, 245, 237]], // water
     [
-        [20, 88, 156],
-        [240, 252, 255],
-        [48, 156, 212],
-        [4, 20, 56],
+        [18, 77, 114],
+        [228, 245, 237],
+        [101, 184, 204],
+        [36, 125, 163],
     ], // waterline: colour 0 is the far-sea blue, so the wave rises out of the sea behind it
 ];
 
 /// Sprite palettes. Colour 0 is transparent. `sprite_pals` in render.c repeats these in RGB555.
 const SP: [[[u8; 3]; 4]; 6] = [
-    [[0, 0, 0], [0, 0, 0], [100, 45, 11], [70, 13, 30]],        // beaver: ink, fur, maroon
+    [[0, 0, 0], [0, 0, 0], [156, 90, 58], [156, 0, 49]],       // supplied beaver/board: ink, fur, maroon
     [[0, 0, 0], [48, 40, 32], [255, 255, 255], [255, 160, 32]],  // gull
     [[0, 0, 0], [140, 80, 8], [248, 188, 32], [255, 236, 140]], // ring
     [[0, 0, 0], [120, 16, 24], [232, 48, 56], [255, 255, 255]], // heart
@@ -68,20 +68,18 @@ const BANK0_RAMP_MAX: usize = 256 - BANK0_RAMP_BASE;
 /// one-pixel difference and bank 0 is shared with the sprite sheets.
 const RAMP_DY_MIN: i32 = -11;
 const RAMP_DY_MAX: i32 = 11;
-/// The bottom lane is half as tall as the main wave at most and twice as long, so its
-/// columns never need the steep ramps; four pixels per column covers all but a few percent
-/// of its columns at the top tiers and the painter clamps those.
-const FRONT_DY_MIN: i32 = -4;
-const FRONT_DY_MAX: i32 = 4;
 
-/// Ramps are drawn for even slopes only; an odd slope borrows the tile one pixel flatter and
-/// the missing pixel lands at the tile edge, where the next column starts from its own
-/// height anyway. A one-pixel-per-tile line looks the same either way, and it halves the
-/// ramp set, which is what pays for the dashed echoes under the crest.
-fn even_slope(dy: i32) -> i32 {
-    dy - dy % 2
+/// Seven representative slopes share the fixed tile budget with the complete depth profile.
+fn ramp_slope(dy: i32) -> i32 {
+    let magnitude = match dy.abs() {
+        0..=1 => 0,
+        2..=3 => 2,
+        4..=5 => 4,
+        _ => 8,
+    };
+    magnitude * dy.signum()
 }
-const RAMP_SUB_MIN: i32 = -8;
+const RAMP_SUB_MIN: i32 = -32;
 const RAMP_SUB_MAX: i32 = 15;
 
 const HUD: u8 = 0;
@@ -237,21 +235,24 @@ impl Img {
     }
 }
 
+pub fn write_pickups(root: &Path) {
+    ring_sheet().write_indexed(&root.join("res/ring.png"), &SP[2..3]);
+    pop_sheet().write_indexed(&root.join("res/pop.png"), &SP[2..3]);
+}
+
 pub fn write(root: &Path) {
     let res = root.join("res");
-    let mut ramps = build_ramps();
+    let ramps = build_ramps();
     let bank1 = ramps.tiles.len().min(BANK1_RAMP_MAX);
     let tiles = tileset(&ramps.tiles[..bank1]);
     tiles.check("bg", 8);
     tiles.write_indexed(&res.join("bg.png"), &BG);
-    // Bank 0 holds the main ramps that did not fit bank 1, then every front-wave ramp; the
-    // front lookup table is offset so its entries are bank-0 positions directly.
+    // Bank 0 holds shared ramps that did not fit bank 1, followed by the scenery.
     let spill = ramps.tiles.len() - bank1;
     let scenery = scenery_tiles();
-    let scene_base = BANK0_RAMP_BASE + spill + ramps.front_tiles.len();
+    let scene_base = BANK0_RAMP_BASE + spill;
     let bank0: Vec<&Img> = ramps.tiles[bank1..]
         .iter()
-        .chain(ramps.front_tiles.iter())
         .chain(scenery.iter())
         .collect();
     assert!(
@@ -260,9 +261,6 @@ pub fn write(root: &Path) {
         bank0.len(),
         BANK0_RAMP_MAX
     );
-    for entry in &mut ramps.front_lut {
-        *entry = u8::try_from(spill + *entry as usize).expect("front ramp position");
-    }
     let tiles0 = tileset0(&bank0);
     tiles0.check("bg0", 8);
     tiles0.write_indexed(&res.join("bg0.png"), &BG);
@@ -270,13 +268,7 @@ pub fn write(root: &Path) {
 
     write_tiles_header(&root.join("src/tiles.h"), ramps.tiles.len(), bank1, scene_base);
 
-    let beaver = beaver_sheet(root);
-    beaver.check("beaver", 1);
-    beaver.write_indexed(&res.join("beaver.png"), &SP[0..1]);
-
-    let board = board_sheet(root);
-    board.check("board", 1);
-    board.write_indexed(&res.join("board.png"), &SP[0..1]);
+    write_actors(root);
 
     let gull = gull_sheet();
     gull.check("gull", 1);
@@ -356,70 +348,24 @@ fn tileset0(ramps: &[&Img]) -> Img {
 }
 
 struct Ramps {
-    /// Main-wave ramps; ids index this list.
+    /// Shared wave ramps; ids index this list.
     tiles: Vec<Img>,
     lut: Vec<u8>,
-    /// Front-wave ramps, always placed in bank 0 after the spilled main ramps.
-    front_tiles: Vec<Img>,
-    front_lut: Vec<u8>,
 }
 
-/// Where the white falls in a wave column: the crest is two solid rows, and under it the
-/// line repeats as dashes, each repeat one pixel further down the face and one pixel to the
-/// right, the way the contour lines stack in the old Pikachu surfing minigame. `below` is
-/// the row's distance under the crest's lower row. Returns 2 for the crest, 1 for a dash,
-/// 0 for plain water.
-fn surf_white(x: i32, below: i32) -> u8 {
-    match below {
-        -1 | 0 => 2,
-        2 if (x + 1).rem_euclid(4) < 2 => 1,
-        4 if (x + 2).rem_euclid(4) < 2 => 1,
-        _ => 0,
-    }
-}
-
-/// Diagonal foam. `sub` is the line's row at the left edge (it may sit outside the tile) and
-/// `dy` is how many rows it rises or falls by the right edge. Rows above the line are sky
-/// (colour 0), the crest is two rows of foam (colour 1) over lit face (colour 2, the same
-/// blue as face_tile) with the dashed echoes of surf_white in it; a column the line passes
-/// below is all sky and a column it passes above is all face, so a steep face stays a steep
-/// face.
+/// Surface-relative bands shared by both waves. No noise or screen-row shading.
+/// Every vertical pixel phase is represented; both lanes reuse the same patterns.
 fn ramp_from_edges(sub: i32, dy: i32) -> Img {
-    let mut tile = solid(LINE, 0);
+    let mut tile = solid(WATER, 0);
     for x in 0..8i32 {
-        let surface = sub + (dy * x) / 8;
+        let surface = sub + (dy * x).div_euclid(8);
         for y in 0..8i32 {
-            let col = if y < surface - 1 {
-                0
-            } else if surf_white(x, y - surface) != 0 {
-                1
-            } else {
-                2
-            };
-            tile.set(x, y, LINE, col);
-        }
-    }
-    tile
-}
-
-/// Front-wave crest in the water palette. Above the line the tile carries on the lowest main
-/// water row (deep_tile's ripples on the lit base) so the two waves read as one body of water;
-/// the line is a two-row white crest with a lit row under it, then the shadowed near face
-/// that front_body_tile() continues to the bottom of the screen, with the same dashed
-/// echoes as the main wave cut into it.
-fn front_ramp_from_edges(sub: i32, dy: i32) -> Img {
-    let mut tile = solid(WATER, 2);
-    for x in 0..8i32 {
-        let surface = sub + (dy * x) / 8;
-        for y in 0..8i32 {
-            let col = if y < surface - 1 {
-                if (x * 3 + y * 2) % 5 == 0 { 1 } else { 2 }
-            } else if surf_white(x, y - surface) != 0 {
-                3
-            } else if y == surface + 1 {
-                2
-            } else {
-                front_body_colour(x, y)
+            let depth = y - surface;
+            let col = match depth {
+                0 => 3,
+                1..=6 => 2,
+                7..=22 => 1,
+                _ => 0,
             };
             tile.set(x, y, WATER, col);
         }
@@ -427,73 +373,28 @@ fn front_ramp_from_edges(sub: i32, dy: i32) -> Img {
     tile
 }
 
-/// Shadowed near-wave face: dark with a few deeper flecks, aligned to the tile grid so a ramp
-/// cell and the body cell under it share the pattern.
-fn front_body_colour(x: i32, y: i32) -> u8 {
-    if (x * 3 + y * 2) % 7 == 0 { 0 } else { 1 }
-}
-
 fn front_body_tile() -> Img {
-    let mut tile = solid(WATER, 1);
-    for y in 0..8i32 {
-        for x in 0..8i32 {
-            tile.set(x, y, WATER, front_body_colour(x, y));
-        }
-    }
-    tile
+    solid(WATER, 0)
 }
 
-/// Both ramp sets share one id space: main-wave ramps first, then front-wave ramps. The lookup
-/// tables are indexed [dy][sub] so the painter computes one row pointer per column.
+/// Both lanes reuse exactly the same tile patterns, including the depth transitions.
 fn build_ramps() -> Ramps {
-    let sub_count = (RAMP_SUB_MAX - RAMP_SUB_MIN + 1) as usize;
     let mut tiles: Vec<Img> = Vec::new();
     let mut seen: HashMap<Vec<u8>, u8> = HashMap::new();
-    let mut intern = |tile: Img| -> u8 {
-        if let Some(id) = seen.get(&tile.pixels) {
-            *id
-        } else {
-            let id = tiles.len() as u8;
-            seen.insert(tile.pixels.clone(), id);
-            tiles.push(tile);
-            id
-        }
-    };
     let mut lut = Vec::new();
     for dy in RAMP_DY_MIN..=RAMP_DY_MAX {
         for sub in RAMP_SUB_MIN..=RAMP_SUB_MAX {
-            lut.push(intern(ramp_from_edges(sub, even_slope(dy))));
-        }
-    }
-    assert!(tiles.len() <= 256, "main ramp ids overflow a byte ({})", tiles.len());
-    let mut front_tiles: Vec<Img> = Vec::new();
-    let mut front_seen: HashMap<Vec<u8>, u8> = HashMap::new();
-    let mut front_lut = Vec::new();
-    for dy in FRONT_DY_MIN..=FRONT_DY_MAX {
-        for sub in RAMP_SUB_MIN..=RAMP_SUB_MAX {
-            // Odd samples reuse the even tile above them. The front crest then steps two
-            // pixels at a time, which frees the tiles for the nose-up and nose-down boards.
-            let tile = front_ramp_from_edges(sub & !1, even_slope(dy));
-            let id = *front_seen.entry(tile.pixels.clone()).or_insert_with(|| {
-                front_tiles.push(tile);
-                (front_tiles.len() - 1) as u8
+            let tile = ramp_from_edges(sub, ramp_slope(dy));
+            let id = *seen.entry(tile.pixels.clone()).or_insert_with(|| {
+                let id = u8::try_from(tiles.len()).expect("ramp ids overflow a byte");
+                tiles.push(tile);
+                id
             });
-            front_lut.push(id);
+            lut.push(id);
         }
     }
-    assert_eq!(lut.len() % sub_count, 0);
-    println!(
-        "gbc ramps: {} main, {} front, {} in bank 0 with the scenery",
-        tiles.len(),
-        front_tiles.len(),
-        tiles.len().saturating_sub(BANK1_RAMP_MAX) + front_tiles.len() + 14
-    );
-    Ramps {
-        tiles,
-        lut,
-        front_tiles,
-        front_lut,
-    }
+    println!("gbc ramps: {} shared surface/depth tiles", tiles.len());
+    Ramps { tiles, lut }
 }
 
 fn push_lut(body: &mut String, name: &str, lut: &[u8], row_len: usize) {
@@ -514,21 +415,19 @@ fn push_lut(body: &mut String, name: &str, lut: &[u8], row_len: usize) {
 fn write_ramp_header(path: &Path, ramps: &Ramps) {
     let mut body = String::from(
         "/* Generated by tools/gen_assets. Diagonal waterline tiles.\n\
-         * RAMP_LUT[(dy - RAMP_DY_MIN) * RAMP_SUB_COUNT + (sub - RAMP_SUB_MIN)] is the main-wave\n\
-         * ramp id (see tiles.h for the bank split). FRONT_LUT[(dy - FRONT_DY_MIN) * RAMP_SUB_COUNT\n\
-         * + (sub - RAMP_SUB_MIN)] is a VRAM bank 0 tile offset: the front ramp is TILE_RAMP0 +\n\
-         * entry. Every entry is a tile; a line that misses the tile maps to an all-water ramp. */\n\
+         * RAMP_LUT[(dy - RAMP_DY_MIN) * RAMP_SUB_COUNT + (sub - RAMP_SUB_MIN)] is the shared\n\
+         * ramp id for either wave (see tiles.h for the bank split). Includes surface-relative\n\
+         * crest, bright face, body and deep-water bands. */\n\
          #ifndef BEAVER_RAMP_H\n\
          #define BEAVER_RAMP_H\n\
          #include <stdint.h>\n\n",
     );
     let sub_count = (RAMP_SUB_MAX - RAMP_SUB_MIN + 1) as usize;
     body.push_str(&format!(
-        "#define RAMP_DY_MIN ({})\n#define RAMP_DY_MAX {}\n#define RAMP_SUB_MIN ({})\n#define RAMP_SUB_MAX {}\n#define RAMP_SUB_COUNT {}\n#define FRONT_DY_MIN ({})\n#define FRONT_DY_MAX {}\n\n",
-        RAMP_DY_MIN, RAMP_DY_MAX, RAMP_SUB_MIN, RAMP_SUB_MAX, sub_count, FRONT_DY_MIN, FRONT_DY_MAX
+        "#define RAMP_DY_MIN ({})\n#define RAMP_DY_MAX {}\n#define RAMP_SUB_MIN ({})\n#define RAMP_SUB_MAX {}\n#define RAMP_SUB_COUNT {}\n\n",
+        RAMP_DY_MIN, RAMP_DY_MAX, RAMP_SUB_MIN, RAMP_SUB_MAX, sub_count
     ));
     push_lut(&mut body, "RAMP_LUT", &ramps.lut, sub_count);
-    push_lut(&mut body, "FRONT_LUT", &ramps.front_lut, sub_count);
     body.push_str("#endif\n");
     fs::write(path, body).unwrap();
 }
@@ -607,15 +506,34 @@ fn sky_haze() -> Img {
 
 fn cloud_block() -> Img {
     let mut img = Img::new(16, 16, false);
-    img.fill(0, 0, 16, 16, CLOUD, 0);
-    img.oval(5, 9, 4, 3, CLOUD, 2);
-    img.oval(10, 10, 4, 2, CLOUD, 2);
-    img.oval(8, 8, 6, 3, CLOUD, 1);
-    img.oval(5, 8, 3, 2, CLOUD, 1);
-    img.oval(11, 9, 3, 2, CLOUD, 1);
-    img.set(4, 7, CLOUD, 3);
-    img.set(6, 6, CLOUD, 3);
-    img.set(9, 6, CLOUD, 3);
+    let rows = [
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAABBBBAAAAAA",
+        "AAAABBBBBBBBAAAA",
+        "AAABBBBBBBBBBAAA",
+        "AACCBBBCCBBBCCAA",
+        "ACCCCBCCCCBCCCCA",
+        "AAACCCCCCCCCCAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAA",
+    ];
+    for (y, row) in rows.iter().enumerate() {
+        for (x, ch) in row.bytes().enumerate() {
+            let colour = match ch {
+                b'B' => 1,
+                b'C' => 3,
+                _ => 0,
+            };
+            img.set(x as i32, y as i32, CLOUD, colour);
+        }
+    }
     img
 }
 
@@ -709,33 +627,15 @@ fn far_tile(top: bool) -> Img {
     tile
 }
 
-/// The three water rows share the ramp fill colour, so a ramp cell never shows a hard edge
-/// against the water beside it; depth is suggested by the texture alone.
-fn water_tile(step: u32, col: u8) -> Img {
-    let mut tile = solid(WATER, 2);
-    for y in 0..8i32 {
-        for x in 0..8i32 {
-            if ((x * 3 + y * 2) as u32) % step == 0 {
-                tile.set(x, y, WATER, col);
-            }
-        }
-    }
-    tile
-}
-
+// Flat fills are used only outside the slope/depth lookup range.
 fn face_tile() -> Img {
-    // Lit water just under the foam line: a few white sparkles.
-    water_tile(13, 3)
+    solid(WATER, 2)
 }
-
 fn body_tile() -> Img {
-    // Mid-depth water: sparse darker ripples.
-    water_tile(7, 1)
+    solid(WATER, 1)
 }
-
 fn deep_tile() -> Img {
-    // Lowest water rows: denser ripples leading into the dark foreground wave.
-    water_tile(5, 1)
+    solid(WATER, 0)
 }
 
 fn spray_tile(frame: usize) -> Img {
@@ -759,13 +659,32 @@ fn spray_tile(frame: usize) -> Img {
     tile
 }
 
-/// Seven 32x32 frames from `gbc/art`: surf, tug, jump, flip, flip turned 90° backwards,
-/// brake left, and drive right. The other three flip steps are this 90° frame and the upright
-/// flip frame with both OAM mirrors, which is a half turn.
+/// Rebuild actor sheets without touching backgrounds, ramps, or scenery.
+pub fn write_actors(root: &Path) {
+    let res = root.join("res");
+    let beaver = beaver_sheet(root);
+    beaver.check("beaver", 1);
+    beaver.write_indexed(&res.join("beaver.png"), &SP[0..1]);
+    let board = board_sheet(root);
+    board.check("board", 1);
+    board.write_indexed(&res.join("board.png"), &SP[0..1]);
+}
+
 fn beaver_sheet(root: &Path) -> Img {
     let mut sheet = Img::new(32 * 7, 32, true);
     let art = root.join("art");
-    let flip = load_pose(&art.join("flip.png"));
+    let mut flip = load_pose(&art.join("jump.png"));
+    let board = load_rgba(&art.join("board.png"), 32, 16);
+    // Attach the overlapping deck before rotating the jump pose for a backflip.
+    for y in 0..16 {
+        for x in 0..32 {
+            let source = (y * 32 + x) * 4;
+            let dest = ((y + 16) * 32 + x) * 4;
+            if flip[dest + 3] == 0 && board[source + 3] != 0 {
+                flip[dest..dest + 4].copy_from_slice(&board[source..source + 4]);
+            }
+        }
+    }
     let poses = [
         load_pose(&art.join("surf.png")),
         load_pose(&art.join("tug.png")),
@@ -822,8 +741,8 @@ fn blit_pose(sheet: &mut Img, frame: usize, rgba: &[u8]) {
             }
             let col = match (pixel[0], pixel[1], pixel[2]) {
                 (0, 0, 0) => 1,
-                (100, 45, 11) => 2,
-                (70, 13, 30) => 3,
+                (156, 90, 58) => 2,
+                (156, 0, 49) => 3,
                 other => panic!("beaver pixel {other:?} at {x},{y}"),
             };
             sheet.set(ox + x as i32, y as i32, 0, col);
@@ -847,16 +766,13 @@ fn board_sheet(root: &Path) -> Img {
                 }
                 let col = match (pixel[0], pixel[1], pixel[2]) {
                     (0, 0, 0) => 1,
-                    (70, 13, 30) => 3,
+                    (156, 0, 49) => 3,
                     other => panic!("board pixel {other:?} at {x},{y}"),
                 };
-                // The top seven rows of every frame are blank. Pack the deck to the top of the
-                // cell so those rows are not sprites sitting across the beaver's belly.
-                let dy = y as i32 - 7;
-                if dy < 0 {
-                    continue;
-                }
-                sheet.set(ox + x as i32, dy, 0, col);
+                // Preserve every row of the supplied 32x16 canvas; tilted noses can
+                // extend to row zero. Do not crop or shift the artwork inside the frame.
+                // The renderer overlaps this canvas with the body's lower 16 rows.
+                sheet.set(ox + x as i32, y as i32, 0, col);
             }
         }
     }
@@ -980,30 +896,12 @@ fn paint_gull(img: &mut Img, ox: i32, art: &str) {
 }
 
 fn ring_sheet() -> Img {
-    let mut img = Img::new(24, 32, true);
-    // Nine rows down. The blank tail then sits above the ring, and the renderer lifts the
-    // sprite by the same amount so the picture stays put and does not cover the beaver.
-    const DROP: i32 = 9;
-    for y in 0..24i32 {
-        for x in 0..24i32 {
-            let dx = x - 11;
-            let dy = y - 11;
-            let d2 = dx * dx + dy * dy;
-            if (5 * 5..=11 * 11).contains(&d2) {
-                let col = if d2 > 10 * 10 {
-                    1
-                } else if d2 < 7 * 7 || dy < -3 {
-                    3
-                } else {
-                    2
-                };
-                img.set(x, y + DROP, 0, col);
-            }
-        }
-    }
-    img.set(7, 4 + DROP, 0, 3);
-    img.set(8, 4 + DROP, 0, 3);
-    img.set(8, 5 + DROP, 0, 3);
+    let mut img = Img::new(16, 16, true);
+    // A small readable gold hoop: dark rim, bright upper edge, transparent opening.
+    stamp_hoop(&mut img, 0, 7, 7, 7, 4);
+    img.set(4, 3, 0, 3);
+    img.set(5, 2, 0, 3);
+    img.set(4, 4, 0, 3);
     img
 }
 

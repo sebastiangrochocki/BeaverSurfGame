@@ -1,5 +1,6 @@
 #include "ramp.h"
 #include "render.h"
+#include "sprites.h"
 
 #include <stddef.h>
 
@@ -13,6 +14,10 @@
 #include "bg.h"
 #include "bg0.h"
 #include "board.h"
+#include "beach.h"
+#include "actors.h"
+#include "shop.h"
+#include "race.h"
 #include "gull.h"
 #include "heart.h"
 #include "pop.h"
@@ -20,12 +25,13 @@
 #include "rules.h"
 #include "splash.h"
 #include "tiles.h"
+#include "progress_data.h"
 
 #define TILE_BEAVER 0
 #define TILE_BOARD (TILE_BEAVER + beaver_TILE_COUNT)
 #define TILE_GULL (TILE_BOARD + board_TILE_COUNT)
 #define TILE_RING (TILE_GULL + gull_TILE_COUNT)
-#define TILE_HEART (TILE_RING + ring_TILE_COUNT)
+#define TILE_HEART 172 /* 164-171 are reserved for the rival's independent deck cache. */
 #define TILE_SPLASH (TILE_HEART + heart_TILE_COUNT)
 #define TILE_ARROW (TILE_SPLASH + splash_TILE_COUNT)
 #define TILE_POP (TILE_ARROW + arrow_TILE_COUNT)
@@ -35,9 +41,9 @@
 #define BOARD_FLAT 0
 #define BOARD_UP 8
 #define BOARD_DOWN 16
-/* Deck packed to the top of the 16px cell, so the blank rows sit in the water under the feet
- * instead of across the belly. Art row 0 is the old row 7, which used to land at feet_y - 3. */
-#define BOARD_TOP_ROW 3
+/* Body top is feet-31. Board top is body top+16: a 16px overlap rather than
+ * stacking beneath the body. Its visible lower eight rows finish at the waterline. */
+#define BOARD_TOP_ROW 15
 #define FRAME_TILES 16
 #define FRAME_SURF 0
 #define FRAME_TUG 1
@@ -53,6 +59,8 @@ typedef char beaver_sheet_ok[(beaver_TILE_COUNT == 7 * FRAME_TILES && board_TILE
 typedef char ramp0_base_ok[(TILE_POP + pop_TILE_COUNT <= TILE_RAMP0) ? 1 : -1];
 typedef char pop_sheet_ok[(pop_TILE_COUNT == 8) ? 1 : -1];
 typedef char ramp0_fits[(TILE_RAMP0 + bg0_TILE_COUNT <= 256) ? 1 : -1];
+/* The assembly painter multiplies LUT rows by 48 and adds 32 to each surface sample. */
+typedef char ramp_layout_ok[(RAMP_SUB_COUNT == 48 && RAMP_SUB_MIN == -32) ? 1 : -1];
 
 /* Map rows 9-17 (lines 72-143) hold both waves: the surf line with its sky above, and the
  * bottom lane painted over whatever of it the near water hides. */
@@ -62,6 +70,11 @@ typedef char ramp0_fits[(TILE_RAMP0 + bg0_TILE_COUNT <= 256) ? 1 : -1];
 
 extern volatile uint8_t scx_sky;
 extern volatile uint8_t scx_island;
+extern volatile uint8_t scx_playfield;
+extern volatile uint8_t scx_beach;
+/* Prepared raster state belongs to the shadow map, not the frame still visible.
+ * Commit both together in VBlank, especially when SCX wraps from 7 to 0. */
+static uint8_t raster_sky, raster_island, raster_playfield, raster_beach;
 
 /* Fixed WRAM above GBDK's data (which ends well under 0xC900; see build/beaver.map).
  *
@@ -85,25 +98,113 @@ extern volatile uint8_t scx_island;
 #define SHADOW_SHORE 0x160
 #define SHADOW_LEN 0x200
 
+/* Bottom two rows share the existing wave DMA. Extra HUD patterns occupy the
+ * unused end of bank 0, after scenery; they use the sky palette with opaque ink. */
+#define PROGRESS_FONT (TILE_RAMP0 + bg0_TILE_COUNT)
+#define PROGRESS_EMPTY (PROGRESS_FONT + 40)
+#define PROGRESS_HEAD 8
+#define PROGRESS_CELLS 16
+typedef char progress_tiles_fit[(PROGRESS_FONT + 42 <= 256) ? 1 : -1];
+volatile uint8_t hud_icons;
+static uint8_t prepared_hud_icons;
+
+/* Only palettes 0 (top HUD) and 5 (sun) are borrowed below the playfield.
+ * Restore them every VBlank; shop interiors never use the landmark raster. */
+void render_hud_palettes(uint8_t bottom) __naked {
+    /* SDCC passes the byte in A. An unrolled port copy keeps both interrupt
+     * paths short, including a stage reset rebuilding the whole scene. */
+    __asm
+        ld b, a
+        or a
+        ld hl, #_progress_game_palettes
+        jr Z, hp_selected
+        ld hl, #_progress_hud_palettes
+hp_selected:
+        ld a, #0x80
+        ld (#0xFF68), a
+        ld c, #0x69
+        ld a, b
+        or a
+        jr Z, hp_write_flag
+hp_flag_active:
+        ld a, (#0xFF41)
+        and a, #3
+        jr Z, hp_flag_active
+hp_flag_blank:
+        ld a, (#0xFF41)
+        and a, #3
+        jr NZ, hp_flag_blank
+hp_write_flag:
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, #0xA8
+        ld (#0xFF68), a
+        ld a, b
+        or a
+        jr Z, hp_write_island
+hp_island_active:
+        ld a, (#0xFF41)
+        and a, #3
+        jr Z, hp_island_active
+hp_island_blank:
+        ld a, (#0xFF41)
+        and a, #3
+        jr NZ, hp_island_blank
+hp_write_island:
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ld a, (hl+)
+        ldh (c), a
+        ret
+    __endasm;
+}
+
 #define ATTR_OF(tile) (((volatile uint8_t *)ATTR_LUT)[tile])
 
 /* Everything prepare_hud reads. The rows are rebuilt only when one of these moved. */
 typedef struct {
     uint32_t score, best;
     uint16_t banner_points;
-    uint8_t phase, blink, hearts, banner, banner_air, banner_mult, combo, combo_hot, pause;
+    uint8_t phase, blink, hearts, stage, banner, banner_air, banner_mult, combo, combo_hot, pause;
 } HudState;
 static HudState hud_last;
 static uint8_t hud_valid;
 
 static uint8_t hud_changed(void) {
     HudState now;
-    now.score = world.phase == PHASE_PLAY ? 0 : world.score;
-    now.best = world.best;
+    now.score = world.phase == PHASE_PLAY && !RACING ? 0 : world.score;
+    now.best = RACING?race.rival.score:world.best;
     now.banner_points = world.banner_points;
     now.phase = world.phase;
     now.blink = (uint8_t)((world.tick >> 5) & 1);
     now.hearts = world.hearts;
+    now.stage = world.stage;
     now.banner = world.banner;
     now.banner_air = world.banner_air;
     now.banner_mult = world.banner_mult;
@@ -123,9 +224,9 @@ static uint8_t want_hud[2][COLS];
 static uint8_t hy[21];
 static uint8_t fy[21];
 static uint8_t fy_half[11];
-static uint8_t *oam_back;
-static uint8_t oam_n;
-static uint8_t oam_used[2];
+uint8_t *oam_back;
+uint8_t oam_n;
+uint8_t oam_used[2];
 
 /* Direct map write. Only for render_init, while the LCD is off. */
 static void poke(uint16_t base, uint8_t x, uint8_t y, uint8_t tile) {
@@ -171,7 +272,7 @@ static void center_text(uint8_t row, const char *text) {
     uint8_t len = 0;
     while (text[len]) len++;
     fill_row(row, TILE_HUD);
-    if (len < COLS) write_text(row, (uint8_t)((COLS - len) / 2), text);
+    write_text(row,len<COLS?(uint8_t)((COLS-len)/2):0,text);
 }
 
 static void write_num(uint8_t row, uint8_t col, uint32_t value, uint8_t digits);
@@ -251,476 +352,6 @@ static void write_num(uint8_t row, uint8_t col, uint32_t value, uint8_t digits) 
     }
 }
 
-/* Sprites already queued on each scanline. The hardware draws at most ten per line and cuts
- * the rest off from the end of OAM, which is what slices a gull or a ring in half. */
-static uint8_t line_n[144];
-
-/* Collected hoop, in world X and screen-rule Y. Counts down once per drawn frame. */
-static int32_t pop_wx;
-static int16_t pop_y;
-static uint8_t pop_age;
-
-#define POP_FRAMES 15
-
-void render_ring_pop(void) {
-    pop_wx = world_beaver_x();
-    pop_y = (int16_t)(world.beaver.y - PX(14));
-    pop_age = POP_FRAMES;
-}
-
-/* The 16 scanlines an 8x16 sprite covers. A C loop here was most of a frame; the count only
- * has to stay honest so a ring or the board can tell when a line is full. */
-static uint8_t bp_base, bp_ox, bp_cols, bp_rows, bp_prop, bp_rowi, bp_coli, bp_sy;
-static int16_t bp_y;
-
-/* fit 0, no flip: the beaver, the gulls and the arrow. The C per-cell path was a frame by itself. */
-static void blit_plain(void) __naked {
-    __asm
-        xor a
-        ld (#_bp_rowi), a
-bp_row_loop:
-        ld a, (#_bp_rowi)
-        ld hl, #_bp_rows
-        cp a, (hl)
-        jp NC, bp_done
-        ld l, a
-        ld h, #0x00
-        add hl, hl
-        add hl, hl
-        add hl, hl
-        add hl, hl
-        ld a, (#_bp_y)
-        add a, l
-        ld e, a
-        ld a, (#_bp_y + 1)
-        adc a, h
-        ld d, a
-        ld a, e
-        add a, #16
-        ld (#_bp_sy), a
-        cp a, #176
-        jr NC, bp_no_count
-        ld a, d
-        or a
-        jr NZ, bp_no_count
-        ld a, e
-        cp a, #144
-        jr NC, bp_no_count
-        ld hl, #_line_n
-        add hl, de
-        ld a, (#_bp_cols)
-        ld b, a
-        ld c, #16
-bp_count:
-        ld a, (hl)
-        add a, b
-        ld (hl+), a
-        inc e
-        ld a, e
-        cp a, #144
-        jr NC, bp_no_count
-        dec c
-        jr NZ, bp_count
-bp_no_count:
-        xor a
-        ld (#_bp_coli), a
-bp_col_loop:
-        ld a, (#_bp_coli)
-        ld hl, #_bp_cols
-        cp a, (hl)
-        jp NC, bp_next_row
-        add a, a
-        add a, a
-        add a, a
-        ld hl, #_bp_ox
-        add a, (hl)
-        ld c, a
-        cp a, #176
-        jr NC, bp_next_col
-        ld a, (#_bp_sy)
-        cp a, #176
-        jr NC, bp_next_col
-        ld a, (#_oam_n)
-        cp a, #40
-        jr NC, bp_next_col
-        ld b, a
-        add a, a
-        add a, a
-        ld l, a
-        ld h, #0x00
-        ld a, (#_oam_back)
-        add a, l
-        ld l, a
-        ld a, (#_oam_back + 1)
-        adc a, h
-        ld h, a
-        ld a, (#_bp_sy)
-        ld (hl+), a
-        ld a, c
-        ld (hl+), a
-        ld a, (#_bp_base)
-        ld (hl+), a
-        ld a, (#_bp_prop)
-        ld (hl), a
-        ld hl, #_oam_n
-        inc (hl)
-bp_next_col:
-        ld hl, #_bp_base
-        inc (hl)
-        inc (hl)
-        ld hl, #_bp_coli
-        inc (hl)
-        jp bp_col_loop
-bp_next_row:
-        ld hl, #_bp_rowi
-        inc (hl)
-        jp bp_row_loop
-bp_done:
-        ret
-    __endasm;
-}
-
-static uint8_t row_free(int16_t top) __naked {
-    __asm
-        ld a, d
-        or a
-        jr NZ, rf_none
-        ld a, e
-        cp a, #144
-        jr NC, rf_none
-        ld hl, #_line_n
-        add hl, de
-        ld c, #16
-        ld b, #10
-rf_fast:
-        ld a, #10
-        sub a, (hl)
-        inc hl
-        cp a, b
-        jr NC, rf_keep
-        ld b, a
-rf_keep:
-        inc e
-        ld a, e
-        cp a, #144
-        jr NC, rf_out
-        dec c
-        jr NZ, rf_fast
-rf_out:
-        ld a, b
-        ret
-rf_none:
-        ld a, #10
-        ret
-    __endasm;
-}
-
-static void take_row(int16_t top) __naked {
-    __asm
-        ld a, d
-        or a
-        ret NZ
-        ld a, e
-        cp a, #144
-        ret NC
-        ld hl, #_line_n
-        add hl, de
-        ld c, #16
-tr_fast:
-        inc (hl)
-        inc hl
-        inc e
-        ld a, e
-        cp a, #144
-        ret NC
-        dec c
-        jr NZ, tr_fast
-        ret
-    __endasm;
-}
-
-/* True when every row of a no-flip block has room for all of its columns. */
-static uint8_t block_fits(int16_t y, uint8_t cols, uint8_t rows) {
-    uint8_t row;
-    for (row = 0; row < rows; row++) {
-        if (row_free((int16_t)(y + (int16_t)((uint8_t)row << 4))) < cols) return 0;
-    }
-    return 1;
-}
-
-/* One 8x16 sprite. `x` and `y` are the top-left in screen pixels. Written straight into the
- * back OAM page in hardware order; the hardware shows a sprite at (OAM x - 8, OAM y - 16). */
-/* `cols` by `rows` of 8x16 sprites. Tile numbers are even and packed in that order. Once the
- * block is known to touch the screen the OAM bytes are built in 8-bit arithmetic; parts that
- * hang off the right or bottom edge are skipped, parts off the left or top are clipped by the
- * hardware. `fit` 0 always queues. `fit` 1 queues the whole block or nothing, so a gull or a
- * ring is never sliced. `fit` 2 queues cells while the row still has a free slot. */
-static uint8_t add_block(uint8_t base, int16_t x, int16_t y, uint8_t cols, uint8_t rows, uint8_t prop,
-                         uint8_t fit) {
-    uint8_t row;
-    uint8_t ox;
-    uint8_t *o;
-    uint8_t hflip = (uint8_t)(prop & 0x20);
-    uint8_t vflip = (uint8_t)(prop & 0x40);
-    /* Only a block entirely off screen is dropped; a part hanging off the left or top wraps
-     * to an OAM coordinate above 175 and is skipped below, the rest still shows. A flip bit
-     * in prop also swaps columns or rows, so the whole picture turns rather than each cell. */
-    if (x <= -8 * (int16_t)cols || x >= 168 || y <= -16 * (int16_t)rows || y >= 144) return 0;
-    /* fit 1 draws the whole block or nothing. Both that and a board that fully fits skip the
-     * per-cell scanline walk; a partial board still uses the slow path below. */
-    if ((prop & 0x60) == 0) {
-        if (fit == 0 || ((fit == 1 || fit == 2) && block_fits(y, cols, rows))) {
-            bp_base = base;
-            bp_ox = (uint8_t)(x + 8);
-            bp_y = y;
-            bp_cols = cols;
-            bp_rows = rows;
-            bp_prop = prop;
-            blit_plain();
-            return 1;
-        }
-        /* The line is full. A whole-or-nothing sprite is left out rather than sliced, and
-         * the slow walk below would only reach the same answer. */
-        if (fit == 1) return 0;
-    }
-    ox = (uint8_t)(x + 8);
-    if (fit == 1) {
-        for (row = 0; row < rows; row++) {
-            uint8_t col;
-            uint8_t visible = 0;
-            int16_t top = (int16_t)(y + (int16_t)((vflip ? (uint8_t)(rows - 1 - row) : row) << 4));
-            uint8_t sy = (uint8_t)(top + 16);
-            for (col = 0; col < cols; col++) {
-                uint8_t sx = (uint8_t)(ox + (uint8_t)((hflip ? (uint8_t)(cols - 1 - col) : col) << 3));
-                if (sx < 176 && sy < 176) visible++;
-            }
-            if (visible > row_free(top)) return 0;
-        }
-    }
-    o = oam_back + (uint8_t)(oam_n << 2);
-    for (row = 0; row < rows; row++) {
-        uint8_t col;
-        int16_t top = (int16_t)(y + (int16_t)((vflip ? (uint8_t)(rows - 1 - row) : row) << 4));
-        uint8_t sy = (uint8_t)(top + 16);
-        for (col = 0; col < cols; col++) {
-            uint8_t sx = (uint8_t)(ox + (uint8_t)((hflip ? (uint8_t)(cols - 1 - col) : col) << 3));
-            if (sx < 176 && sy < 176 && oam_n < 40 && (fit != 2 || row_free(top) > 0)) {
-                o[0] = sy;
-                o[1] = sx;
-                o[2] = base;
-                o[3] = prop;
-                o += 4;
-                oam_n++;
-                take_row(top);
-            }
-            base = (uint8_t)(base + 2);
-        }
-    }
-    return 1;
-}
-
-/* Nose up while the beaver is rising, nose down while falling, flat on level water.
- * On the sea that is the slope at the beaver's position times the way they travel along it.
- * In the air it is their vertical speed. Buttons do not pick the board. */
-static uint8_t board_for_path(void) {
-    int16_t face;
-    int16_t along;
-    if (world.phase != PHASE_PLAY) return BOARD_FLAT;
-    if (world.beaver.airborne) {
-        if (world.beaver.vy < 0) return BOARD_UP;
-        if (world.beaver.vy > 0) return BOARD_DOWN;
-        return BOARD_FLAT;
-    }
-    face = lane_slope(world_beaver_x(), world.beaver.lane);
-    along = (int16_t)((world.speed >> 2) + (world.beaver.vx >> 2));
-    if (face > -PX(1) && face < PX(1)) return BOARD_FLAT;
-    if (along > -16 && along < 16) return BOARD_FLAT;
-    return ((int32_t)face * (int32_t)along < 0) ? BOARD_UP : BOARD_DOWN;
-}
-
-/* Which body frame the beaver shows. Title and the game-over screen hold the surf pose:
- * stun and invuln are not stepped there, so a wipeout would otherwise freeze mid-tumble.
- * `mirror` is set for the half-turn and three-quarter-turn of a backflip. */
-static uint8_t beaver_pose(uint8_t *mirror) {
-    *mirror = 0;
-    if (world.phase != PHASE_PLAY) return FRAME_SURF;
-    if (world.beaver.airborne && world.beaver.flip > 0) {
-        /* Four quarter-turns. 180 and 270 are the first two frames mirrored on both axes. */
-        uint8_t turned = (uint8_t)(((uint16_t)(FLIP_FRAMES - world.beaver.flip) * 4) / FLIP_FRAMES);
-        if (turned > 3) turned = 3;
-        if (turned >= 2) *mirror = OAM_FLIP_XY;
-        return (turned & 1) ? FRAME_FLIP90 : FRAME_FLIP;
-    }
-    /* Down is the crouch: speed on a downhill face, and a shorter body under the gulls. */
-    if (last_input & INPUT_DIVE) return FRAME_TUG;
-    if (world.beaver.airborne) return FRAME_JUMP;
-    if ((last_input & INPUT_LEFT) && !(last_input & INPUT_RIGHT)) return FRAME_LEFT;
-    if ((last_input & INPUT_RIGHT) && !(last_input & INPUT_LEFT)) return FRAME_RIGHT;
-    return FRAME_SURF;
-}
-
-/* Rules live in the 240x160 Game Boy Advance frame. The Color screen is 160 wide, and the
- * surfable wave has to sit in rows 72-119, so actors are squeezed across and lifted up. */
-#define VIEW_LIFT 24
-
-/* 2r / 3 for r in 0..47; the 48-pixel groups above it contribute 32 each. */
-static const uint8_t TWO_THIRDS[48] = {0,  0,  1,  2,  2,  3,  4,  4,  5,  6,  6,  7,  8,  8,  9,  10,
-                                       10, 11, 12, 12, 13, 14, 14, 15, 16, 16, 17, 18, 18, 19, 20, 20,
-                                       21, 22, 22, 23, 24, 24, 25, 26, 26, 27, 28, 28, 29, 30, 30, 31};
-
-/* (px * 2) / 3 without a division; anything far off screen just stays hidden. */
-static int16_t view_x(int16_t px) {
-    uint16_t v;
-    uint8_t groups = 0;
-    if (px < -48 || px > 400) return -64;
-    v = (uint16_t)(px + 48);
-    while (v >= 48) {
-        v -= 48;
-        groups++;
-    }
-    return (int16_t)(((int16_t)groups << 5) + TWO_THIRDS[v] - 32);
-}
-
-static int16_t view_y(int16_t py) {
-    return (int16_t)(py - VIEW_LIFT);
-}
-
-/* Full hoop, then the smaller hoop, then the two halves fly apart. */
-static void draw_ring_pop(void) {
-    int16_t x;
-    int16_t y;
-    uint8_t age;
-    int16_t spread;
-    if (pop_age == 0) return;
-    age = pop_age--;
-    x = view_x((int16_t)((pop_wx - world.scroll) >> 6));
-    y = view_y((int16_t)(pop_y >> 6));
-    if (age > 10) {
-        add_block((uint8_t)TILE_RING, (int16_t)(x - 12), (int16_t)(y - 21), 3, 2, 2, 0);
-    } else if (age > 5) {
-        add_block((uint8_t)TILE_POP, (int16_t)(x - 8), (int16_t)(y - 8), 2, 1, 2, 0);
-    } else {
-        spread = (int16_t)((6 - age) << 1);
-        add_block((uint8_t)(TILE_POP + 4), (int16_t)(x - 8 - spread), (int16_t)(y - 8), 1, 1, 2, 0);
-        add_block((uint8_t)(TILE_POP + 6), (int16_t)(x + spread), (int16_t)(y - 8), 1, 1, 2, 0);
-    }
-}
-
-static void prepare_sprites(void) {
-    int16_t feet_x = view_x((int16_t)(world.beaver.x >> 6));
-    int16_t feet_y = view_y((int16_t)(world.beaver.y >> 6));
-    uint8_t playing = world.phase == PHASE_PLAY;
-    uint8_t show_board = 1;
-    uint8_t i;
-    uint8_t drawn;
-    oam_n = 0;
-    memset(line_n, 0, sizeof line_n);
-
-    /* A few pixels of rise and fall on the title, matching the Advance build. */
-    if (world.phase == PHASE_TITLE) {
-        uint8_t t = (uint8_t)(world.tick % 24);
-        feet_y = (int16_t)(feet_y + (t < 12 ? (t >> 2) : ((24 - t) >> 2)));
-    }
-
-    /* The meter arrow sits on the top rows, clear of the actors, so it takes its slot first. */
-    if (playing && world.meter >= 0) {
-        add_block((uint8_t)TILE_ARROW, (int16_t)(28 + world.meter), 2, 1, 1, 5, 0);
-    }
-
-    /* OAM order is who keeps their pixels when a line is full: the beaver, then rings and
-     * gulls, then the board. The board is four sprites wide and used to be queued first,
-     * so a gull or a ring crossing the rider was the one the hardware cut in half.
-     * Invuln blinking is play-only. After a death the counter is left where it stopped,
-     * and the title would otherwise hide the beaver for good. */
-    if (!(playing && world.invuln && ((world.invuln >> 2) & 1))) {
-        uint8_t mirror = 0;
-        uint8_t frame = beaver_pose(&mirror);
-        int16_t body_y = feet_y;
-        uint8_t show_body = 1;
-        if (playing && world.banner == BANNER_WIPEOUT && world.stun) {
-            uint8_t gone = (uint8_t)(WIPEOUT_FRAMES - world.stun);
-            /* Thrown off and under, then the beaver climbs back on. */
-            frame = FRAME_SURF;
-            mirror = 0;
-            if (gone < 16) {
-                body_y = (int16_t)(feet_y + gone);
-            } else if (gone < 48) {
-                show_body = 0;
-            } else {
-                body_y = (int16_t)(feet_y + (WIPEOUT_FRAMES - gone));
-            }
-        }
-        /* The 32x32 frame's bottom sits on the feet. The beaver is queued first so it stays
-         * in front of the board where the belly overlaps the deck. */
-        if (frame == FRAME_FLIP || frame == FRAME_FLIP90) show_board = 0;
-        if (show_body) {
-            add_block((uint8_t)(TILE_BEAVER + frame * FRAME_TILES), (int16_t)(feet_x - 16), (int16_t)(body_y - 31), 4,
-                      2, mirror, 0);
-        }
-    } else {
-        show_board = 0;
-    }
-
-    /* Gulls, pickups and spray belong to a run. Game over leaves them in the world, and the
-     * title that follows would otherwise keep drawing a heart over an empty sea. Gulls go
-     * before the pickups: a gull is always drawn, and a ring or heart that would push a
-     * line past ten sprites is skipped whole instead of losing a side. */
-    if (playing) {
-        drawn = 0;
-        for (i = 0; i < 4 && drawn < 3; i++) {
-            int16_t x;
-            int16_t y;
-            uint8_t frame;
-            if (!world.gull_present[i]) continue;
-            x = view_x((int16_t)(world.gulls[i].x >> 6));
-            y = view_y((int16_t)(world.gulls[i].y >> 6));
-            if (x < -24 || x > 184) continue;
-            /* Wing stroke up, level, down, level; the 32x16 frame has its body around x 3-28. */
-            frame = (uint8_t)((world.tick >> 3) & 3);
-            if (frame == 3) frame = 1;
-            drawn = (uint8_t)(drawn + add_block((uint8_t)(TILE_GULL + frame * 8), (int16_t)(x - 15),
-                                                (int16_t)(y - 8), 4, 1, 1, 0));
-        }
-
-        drawn = 0;
-        for (i = 0; i < 3 && drawn < 2; i++) {
-            int16_t x;
-            int16_t y;
-            if (!world.ring_present[i]) continue;
-            x = view_x((int16_t)(world.rings[i].x >> 6));
-            y = view_y((int16_t)(world.rings[i].y >> 6));
-            if (x < -24 || x > 184) continue;
-            /* The sheet is shifted down nine rows, so the top is nine pixels higher and the
-             * blank tail stays above the ring instead of covering the beaver's head. */
-            drawn = (uint8_t)(drawn + add_block((uint8_t)TILE_RING, (int16_t)(x - 12), (int16_t)(y - 21), 3, 2, 2, 1));
-        }
-
-        if (world.heart_present) {
-            int16_t x = (int16_t)(world.heart.x >> 6);
-            int16_t y = (int16_t)(world.heart.y >> 6);
-            add_block((uint8_t)TILE_HEART, (int16_t)(view_x(x) - 8), (int16_t)(view_y(y) - 8), 2, 1, 3, 1);
-        }
-    }
-
-    draw_ring_pop();
-
-    if (show_board) {
-        add_block((uint8_t)(TILE_BOARD + board_for_path()), (int16_t)(feet_x - 16),
-                  (int16_t)(feet_y - BOARD_TOP_ROW), 4, 1, 0, 2);
-    }
-
-    if (playing && world.splash.present) {
-        int16_t sx = view_x((int16_t)(world.splash.x >> 6));
-        int16_t sy = view_y((int16_t)(world.splash.y >> 6));
-        add_block((uint8_t)TILE_SPLASH, (int16_t)(sx - 16), (int16_t)(sy - 16), 4, 1, 4, 2);
-    }
-    /* Entries this page used last time but not now hide with y = 0. */
-    {
-        uint8_t page = (uint16_t)oam_back == OAM_PAGE_A ? 0 : 1;
-        for (i = oam_n; i < oam_used[page]; i++) oam_back[(uint8_t)(i << 2)] = 0;
-        oam_used[page] = oam_n;
-    }
-}
 
 /* want_hud (20 wide) into the shadow HUD rows with their palette bytes. */
 static void hud_commit(void) __naked {
@@ -760,6 +391,17 @@ static void banner_text(char *out) {
         strcpy(out, "WIPEOUT");
     } else if (world.banner == BANNER_HEART) {
         strcpy(out, "HALF HEART");
+    } else if (world.banner == BANNER_LOW) {
+        strcpy(out, "TOO LOW");
+    } else if (world.banner == BANNER_HIT) {
+        strcpy(out, "HIT 50 LOST");
+    } else if (world.banner == BANNER_COINS) {
+        uint16_t points=world.banner_points;
+        strcpy(out,"COINS ");
+        if(points>=100) {out[6]=(char)('0'+points/100);out[7]=(char)('0'+(points/10)%10);out[8]=(char)('0'+points%10);out[9]=0;}
+        else {out[6]=(char)('0'+points/10);out[7]=(char)('0'+points%10);out[8]=0;}
+    } else if (world.banner == BANNER_CLEAN) {
+        strcpy(out, "CLEAN LAND");
     } else if (world.banner == BANNER_TRICK) {
         const char *kind = world.banner_air ? "AIR " : "FLIP ";
         uint8_t n = 0;
@@ -791,9 +433,15 @@ static void banner_text(char *out) {
 }
 
 static void prepare_hud(void) {
-    char text[12];
+    char text[32],race_bottom[32];
     uint8_t i;
     uint8_t blink = (uint8_t)((world.tick >> 5) & 1);
+    if(race_hud(text,race_bottom,0)) {
+        center_text(0,text);
+        if(RACING && !pause_show) {banner_text(text);center_text(1,text[0]?text:race_bottom);}
+        else center_text(1,pause_show?"PAUSED":race_bottom);
+        return;
+    }
     if (world.phase == PHASE_TITLE) {
         center_text(0, "BEAVER SURF");
         if (blink) center_text(1, "PRESS START");
@@ -807,6 +455,30 @@ static void prepare_hud(void) {
             else center_label_num(1, "BEST", world.best);
         } else {
             center_label_num(1, "SCORE", world.score);
+        }
+        return;
+    }
+
+    if(world.phase==PHASE_SHOP) {
+        center_text(0,shop_mode==SHOP_BROWSE?"CHOOSE YOUR BOARD":"BEAVER SURF SHOP");
+        center_label_num(1,"POINTS",world.score);
+        return;
+    }
+
+    if (world.phase == PHASE_BEACH_START) {
+        center_text(0, world.stage == 1 ? "BEACH START" : "NEXT BEACH");
+        center_text(1, race_near()?"A TALK TO RIVAL":shop_near_door()?"A ENTER SURF SHOP":(world.tick>>6)&1?"JUMP THEN DOWN LANE":"A JUMP THEN UP LANE");
+        return;
+    }
+    if (world.phase == PHASE_BEACH_END) {
+        center_text(0, "BEACH CLEAR");
+        if(shop_near_door())center_text(1,"A ENTER SURF SHOP");
+        else {
+            strcpy(text,"STAGE 000");
+            text[6]=(char)('0'+world.stage/100);
+            text[7]=(char)('0'+(world.stage/10)%10);
+            text[8]=(char)('0'+world.stage%10);
+            center_text(1,text);
         }
         return;
     }
@@ -835,17 +507,6 @@ static void prepare_hud(void) {
 }
 
 typedef char heights_at_117[(offsetof(World, heights) == 117) ? 1 : -1];
-
-/* s * 21 for s in 0..23. Kept as a table so the waterline loop does not call a multiply. */
-static const uint16_t MUL21[24] = {0,   21,  42,  63,  84,  105, 126, 147, 168, 189, 210, 231,
-                                    252, 273, 294, 315, 336, 357, 378, 399, 420, 441, 462, 483};
-
-static uint8_t clamp_y(int16_t y) {
-    if (y < 0) return 0;
-    if (y > 200) return 200;
-    return (uint8_t)y;
-}
-
 
 static uint8_t sl_left, sl_step, sl_front;
 static uint8_t *sl_out;
@@ -1036,77 +697,159 @@ static void sample_front(uint16_t base) {
     fy[20] = fy_half[10];
 }
 
-static uint8_t p_col, p_front, p_spray, p_span, p_sky, p_wat, p_skytop, p_wattop, hy_col;
-/* Line tops of the rows the surf pass painted this column, [p_band_lo, p_band_hi), and the
- * row index of p_band_hi. */
-static uint8_t p_band_lo, p_band_hi, p_brow_hi;
-/* Front pass scratch: first row to visit, and the line top of last frame's first deep row. */
-static uint8_t p_fstart, p_fhi_old;
-static uint16_t p_lut;
-/* Per column, the rows that held sky-with-spray, ramps or anything else not fixed by row
- * last frame: [pb_lo, pb_hi). Only the union with the new band is repainted, since sky
- * stays sky and the water gradient is fixed by row. */
-static uint8_t pb_lo[20], pb_hi[20];
-/* Per column, the bottom lane's rows last frame: ramps from fb_lo, near face from fb_hi down.
- * Rows above fb_lo that the lane has left are put back; rows under fb_hi stay as they are
- * unless the surf pass wrote over them this frame. */
-static uint8_t fb_lo[20], fb_hi[20];
+/* One tile-map pass over both waves. The shared ramps contain the complete 23px
+ * depth profile, so shade boundaries move with each surface. Tile pixels stay static. */
+static uint8_t p_col, p_fronttop;
+static uint16_t p_mainlut, p_frontlut;
 
-/* Repaints the 20 columns of the shadow wave band.
- *
- * Per column: sky rows above the line, a spray tile in the last sky row on steep slopes,
- * ramp tiles where the line crosses and in the row under it (the dashed echoes hang there),
- * then a depth gradient fixed by row below. Only rows in the union of last frame's and this
- * frame's ramp band are rewritten (pb_lo / pb_hi).
- * The bottom lane is then painted over the same rows: front ramps where its line crosses, the
- * near face below it, and above it the surf pass's work is left alone where that pass ran this
- * frame or put back to far sea / gradient where it did not (the lane may have covered it).
- * This pass is incremental too (fb_lo / fb_hi): it visits the ramp rows, the rows the lane
- * has left since last frame, and the near-face rows the surf pass wrote over.
- * Ramp ids come from RAMP_LUT / FRONT_LUT rows chosen once per column (p_lut).
- * Registers through the row loops: HL cell pointer, E row top, C y0, B rows left. */
 static void paint_all(void) __naked {
     __asm
-        ld c, #0
-pa_col:
-        ld b, #0
-        ld hl, #_hy
-        add hl, bc
-        ld a, (hl+)
-        ld e, a
-        ld (#_hy_col), a
-        ld d, (hl)
-        ld hl, #_fy
-        add hl, bc
-        ld a, (hl)
-        ld (#_p_front), a
-        ld a, c
+        xor a
         ld (#_p_col), a
-        ld a, d
+wg_col:
+        ld a, (#_p_col)
+        ld e, a
+        ld d, #0
+        ld hl, #_hy
+        add hl, de
+        ld a, (hl+)
+        ld c, a
+        ld a, (hl)
+        sub a, c
+        call wg_lut
+        ld a, l
+        ld (#_p_mainlut), a
+        ld a, h
+        ld (#_p_mainlut + 1), a
+        ld a, (#_p_col)
+        ld e, a
+        ld d, #0
+        ld hl, #_fy
+        add hl, de
+        ld a, (hl+)
+        ld c, a
+        ld a, (hl)
+        cp a, c
+        jr C, wg_frontmin
+        ld a, c
+wg_frontmin:
+        and a, #0xf8
+        ld (#_p_fronttop), a
+        ld a, (hl)
+        sub a, c
+        call wg_lut
+        ld a, l
+        ld (#_p_frontlut), a
+        ld a, h
+        ld (#_p_frontlut + 1), a
+        ld a, (#_p_col)
+        add a, #SHADOW_WAVE
+        ld l, a
+        ld h, #(SHADOW_TILES >> 8)
+        ld e, #72
+        ; The final two rows are fixed HUD, never water. Leave their cache intact.
+        ld b, #(WAVE_ROWS - 2)
+wg_row:
+        push hl
+        ld a, (#_p_fronttop)
+        cp a, e
+        jr C, wg_front
+        jr Z, wg_front
+        ld hl, #_p_mainlut
+        ld a, (#_p_col)
+        ld c, a
+        push hl
+        ld hl, #_hy
+        jr wg_sample
+wg_front:
+        ld hl, #_p_frontlut
+        ld a, (#_p_col)
+        ld c, a
+        push hl
+        ld hl, #_fy
+wg_sample:
+        ld a, l
+        add a, c
+        ld l, a
+        jr NC, wg_sampleok
+        inc h
+wg_sampleok:
+        ld a, (hl)
+        add a, #32
         sub a, e
-        jr NC, pa_down
-        cpl
+        pop hl
+        cp a, #RAMP_SUB_COUNT
+        jr NC, wg_solid
+        add a, (hl)
+        inc hl
+        ld h, (hl)
+        ld l, a
+        jr NC, wg_lookup
+        inc h
+wg_lookup:
+        ld a, (hl)
+        pop hl
+        cp a, #TILE_RAMP1_COUNT
+        jr NC, wg_bank0
+        add a, #TILE_RAMP
+        ld (hl), a
+        set 1, h
+        ld (hl), #0x0e
+        jr wg_next
+wg_bank0:
+        add a, #(TILE_RAMP0 - TILE_RAMP1_COUNT)
+        ld (hl), a
+        set 1, h
+        ld (hl), #0x06
+        jr wg_next
+wg_solid:
+        bit 7, a
+        pop hl
+        jr Z, wg_sea
+        ld (hl), #TILE_FRONT_DEEP
+        set 1, h
+        ld (hl), #0x0e
+        jr wg_next
+wg_sea:
+        ld (hl), #TILE_FAR_BODY
+        set 1, h
+        ld (hl), #0x0b
+wg_next:
+        res 1, h
+        ld a, l
+        add a, #32
+        ld l, a
+        jr NC, wg_samerow
+        inc h
+wg_samerow:
+        ld a, e
+        add a, #8
+        ld e, a
+        dec b
+        jp NZ, wg_row
+        ld a, (#_p_col)
         inc a
+        ld (#_p_col), a
+        cp a, #20
+        jp NZ, wg_col
+        ret
+        ; A = signed slope. Each LUT row has 48 entries: index * (32 + 16).
+wg_lut:
+        bit 7, a
+        jr Z, wg_positive
+        cp a, #(256 + RAMP_DY_MIN)
+        jr NC, wg_clamped
+        ld a, #(256 + RAMP_DY_MIN)
+        jr wg_clamped
+wg_positive:
         cp a, #(RAMP_DY_MAX + 1)
-        jr C, pa_up_ok
+        jr C, wg_clamped
         ld a, #RAMP_DY_MAX
-pa_up_ok:
-        ld (#_p_span), a
-        cpl
-        inc a
-        jr pa_dy
-pa_down:
-        cp a, #(RAMP_DY_MAX + 1)
-        jr C, pa_dy_ok
-        ld a, #RAMP_DY_MAX
-pa_dy_ok:
-        ld (#_p_span), a
-pa_dy:
-        ld d, a
-        push de
+wg_clamped:
         add a, #(0 - RAMP_DY_MIN)
         ld l, a
-        ld h, #0x00
+        ld h, #0
+        add hl, hl
         add hl, hl
         add hl, hl
         add hl, hl
@@ -1116,470 +859,12 @@ pa_dy:
         add hl, de
         ld de, #_RAMP_LUT
         add hl, de
-        ld a, l
-        ld (#_p_lut), a
-        ld a, h
-        ld (#_p_lut + 1), a
-        pop de
-        ld a, d
-        add a, e
-        cp a, e
-        jr C, pa_rise
-        ld l, e
-        ld h, a
-        jr pa_edges
-pa_rise:
-        ld l, a
-        ld h, e
-pa_edges:
-        ld a, l
-        sub a, #81
-        jr C, pa_sky0
-        srl a
-        srl a
-        srl a
-        inc a
-        cp a, #(WAVE_ROWS + 1)
-        jr C, pa_skydone
-        ld a, #WAVE_ROWS
-        jr pa_skydone
-pa_sky0:
-        xor a
-pa_skydone:
-        ld b, a
-        ld (#_p_sky), a
-        ; Ramp rows run one past the row holding the lower edge, for the echoes under it.
-        ld a, h
-        sub a, #72
-        jr C, pa_wat0
-        srl a
-        srl a
-        srl a
-        inc a
-        inc a
-        cp a, #(WAVE_ROWS + 1)
-        jr C, pa_watdone
-        ld a, #WAVE_ROWS
-        jr pa_watdone
-pa_wat0:
-        ld a, #1
-pa_watdone:
-        cp a, b
-        jr NC, pa_watok
-        ld a, b
-pa_watok:
-        ld (#_p_wat), a
-        add a, a
-        add a, a
-        add a, a
-        add a, #72
-        ld (#_p_wattop), a
-        ld a, b
-        add a, a
-        add a, a
-        add a, a
-        add a, #72
-        ld (#_p_skytop), a
-        ld a, (#_p_span)
-        cp a, #3
-        jr C, pa_band
-        ld a, b
-        or a
-        jr Z, pa_band
-        dec b
-pa_band:
-        ld a, (#_p_col)
-        ld e, a
-        ld d, #0x00
-        ld hl, #_pb_lo
-        add hl, de
-        ld a, (hl)
-        ld (hl), b
-        cp a, b
-        jr C, pa_lo_ok
-        ld a, b
-pa_lo_ok:
-        ld c, a
-        ld hl, #_pb_hi
-        add hl, de
-        ld a, (#_p_wat)
-        ld b, a
-        ld a, (hl)
-        ld (hl), b
-        cp a, b
-        jr NC, pa_hi_ok
-        ld a, b
-pa_hi_ok:
-        ; Band rows [c, a) as line tops, for the front pass.
-        ld b, a
-        ld (#_p_brow_hi), a
-        ld a, c
-        add a, a
-        add a, a
-        add a, a
-        add a, #72
-        ld (#_p_band_lo), a
-        ld e, a
-        ld a, b
-        add a, a
-        add a, a
-        add a, a
-        add a, #72
-        ld (#_p_band_hi), a
-        ld a, b
-        sub a, c
-        jp Z, pa_front
-        ld b, a
-        ; HL = SHADOW_TILES + SHADOW_WAVE + col + 32 * c; nine rows cross a page.
-        ld a, c
-        add a, a
-        add a, a
-        add a, a
-        ld l, a
-        ld h, #0x00
-        add hl, hl
-        add hl, hl
-        ld a, (#_p_col)
-        add a, #SHADOW_WAVE
-        add a, l
-        ld l, a
-        ld a, h
-        adc a, #(SHADOW_TILES >> 8)
-        ld h, a
-        ld a, (#_hy_col)
-        ld c, a
-pa_rloop:
-        ld a, (#_p_skytop)
-        cp a, e
-        jr Z, pa_notsky
-        jr C, pa_notsky
-        sub a, #8
-        cp a, e
-        jr NZ, pa_sky
-        ld a, (#_p_span)
-        cp a, #3
-        jr C, pa_sky
-        ld a, (#_p_spray)
-        ld d, a
-        ld a, (#_p_col)
-        add a, d
-        and a, #0x01
-        add a, #TILE_SPRAY
-        ld (hl), a
-        set 1, h
-        ld (hl), #0x0f
-        jr pa_rnext
-pa_sky:
-        ; Above the surf line the far sea of the island band carries on (TILE_FAR_BODY).
-        ld (hl), #63
-        set 1, h
-        ld (hl), #0x0b
-        jr pa_rnext
-pa_notsky:
-        ld a, (#_p_wattop)
-        cp a, e
-        jr Z, pa_water
-        jr C, pa_water
-        ld a, c
-        add a, #8
-        sub a, e
-        cp a, #RAMP_SUB_COUNT
-        jr C, pa_lut
-        bit 7, a
-        jr NZ, pa_face
-        ld (hl), #63
-        set 1, h
-        ld (hl), #0x0b
-        jr pa_rnext
-pa_lut:
-        push hl
-        ld hl, #_p_lut
-        add a, (hl)
-        inc hl
-        ld h, (hl)
-        ld l, a
-        jr NC, pa_lut_ok
-        inc h
-pa_lut_ok:
-        ld a, (hl)
-        pop hl
-        cp a, #TILE_RAMP1_COUNT
-        jr NC, pa_ramp0
-        add a, #TILE_RAMP
-        ld (hl), a
-        set 1, h
-        ld (hl), #0x0f
-        jr pa_rnext
-pa_ramp0:
-        add a, #(TILE_RAMP0 - TILE_RAMP1_COUNT)
-        ld (hl), a
-        set 1, h
-        ld (hl), #0x07
-        jr pa_rnext
-pa_face:
-        ld (hl), #64
-        set 1, h
-        ld (hl), #0x0e
-        jr pa_rnext
-pa_water:
-        ld a, e
-        ld d, #64
-        cp a, #96
-        jr C, pa_wtile
-        ld d, #65
-        cp a, #104
-        jr C, pa_wtile
-        ld d, #66
-pa_wtile:
-        ld (hl), d
-        set 1, h
-        ld (hl), #0x0e
-pa_rnext:
-        res 1, h
-        ld a, l
-        add a, #32
-        ld l, a
-        jr NC, pa_rsame
-        inc h
-pa_rsame:
-        ld a, e
-        add a, #8
-        ld e, a
-        dec b
-        jp NZ, pa_rloop
-pa_front:
-        ld a, (#_p_col)
-        ld c, a
-        ld b, #0x00
-        ld hl, #_fy
-        add hl, bc
-        ld a, (hl+)
-        ld (#_p_front), a
-        ld e, a
-        ld a, (hl)
-        sub a, e
-        jr NC, pa_fdown
-        cp a, #(256 + FRONT_DY_MIN)
-        jr NC, pa_fdy
-        ld a, #(256 + FRONT_DY_MIN)
-        jr pa_fdy
-pa_fdown:
-        cp a, #(FRONT_DY_MAX + 1)
-        jr C, pa_fdy
-        ld a, #FRONT_DY_MAX
-pa_fdy:
-        add a, #(0 - FRONT_DY_MIN)
-        ld l, a
-        ld h, #0x00
-        add hl, hl
-        add hl, hl
-        add hl, hl
-        ld e, l
-        ld d, h
-        add hl, hl
-        add hl, de
-        ld de, #_FRONT_LUT
-        add hl, de
-        ld a, l
-        ld (#_p_lut), a
-        ld a, h
-        ld (#_p_lut + 1), a
-        ; Ramp rows are those with sub 0..23: line tops from y-15 to y+8, so rows
-        ; (y-80)>>3 up to but not including (y-56)>>3, both clipped to 0..WAVE_ROWS.
-        ld a, (#_p_front)
-        sub a, #80
-        jr NC, pf_lo_pos
-        xor a
-pf_lo_pos:
-        srl a
-        srl a
-        srl a
-        cp a, #WAVE_ROWS
-        jr C, pf_lo_ok
-        ld a, #WAVE_ROWS
-pf_lo_ok:
-        ld d, a
-        ld a, (#_p_front)
-        sub a, #56
-        jr NC, pf_hi_pos
-        xor a
-pf_hi_pos:
-        srl a
-        srl a
-        srl a
-        cp a, #WAVE_ROWS
-        jr C, pf_hi_ok
-        ld a, #WAVE_ROWS
-pf_hi_ok:
-        ld e, a
-        ; Visit from the lower of last frame's and this frame's first ramp row, down to the
-        ; highest of this frame's first deep row, last frame's, and the end of the surf band.
-        ld a, (#_p_col)
-        ld c, a
-        ld b, #0x00
-        ld hl, #_fb_lo
-        add hl, bc
-        ld a, (hl)
-        ld (hl), d
-        cp a, d
-        jr C, pf_start_ok
-        ld a, d
-pf_start_ok:
-        ld (#_p_fstart), a
-        ld hl, #_fb_hi
-        add hl, bc
-        ld a, (hl)
-        ld (hl), e
-        ld b, a
-        add a, a
-        add a, a
-        add a, a
-        add a, #72
-        ld (#_p_fhi_old), a
-        ld a, b
-        cp a, e
-        jr NC, pf_end_old
-        ld a, e
-pf_end_old:
-        ld b, a
-        ld a, (#_p_brow_hi)
-        cp a, b
-        jr NC, pf_end_ok
-        ld a, b
-pf_end_ok:
-        ld b, a
-        ld a, (#_p_fstart)
-        ld c, a
-        ld a, b
-        sub a, c
-        jp Z, pa_fdone
-        ld b, a
-        ; HL = SHADOW_TILES + SHADOW_WAVE + col + 32 * start row, E = its line top.
-        ld a, c
-        add a, a
-        add a, a
-        add a, a
-        ld e, a
-        add a, #72
-        ld (#_p_fstart), a
-        ld l, e
-        ld h, #0x00
-        add hl, hl
-        add hl, hl
-        ld a, (#_p_col)
-        add a, #SHADOW_WAVE
-        add a, l
-        ld l, a
-        ld a, h
-        adc a, #(SHADOW_TILES >> 8)
-        ld h, a
-        ld a, (#_p_fstart)
-        ld e, a
-        ld a, (#_p_front)
-        ld c, a
-pa_floop:
-        ld a, c
-        add a, #8
-        sub a, e
-        cp a, #RAMP_SUB_COUNT
-        jr NC, pa_fnot
-        push hl
-        ld hl, #_p_lut
-        add a, (hl)
-        inc hl
-        ld h, (hl)
-        ld l, a
-        jr NC, pa_flut_ok
-        inc h
-pa_flut_ok:
-        ld a, (hl)
-        pop hl
-        add a, #TILE_RAMP0
-        ld (hl), a
-        set 1, h
-        ld (hl), #0x06
-        jr pa_fnext
-pa_fnot:
-        cp a, #0x80
-        jr C, pa_fabove
-        ; Line above this cell (sub negative, wrapped high): the shadowed near face. Already
-        ; there from last frame unless the surf pass wrote the cell this frame.
-        ld a, (#_p_fhi_old)
-        cp a, e
-        jr Z, pa_fdeep_chk
-        jr C, pa_fdeep_chk
-        jr pa_fdeep
-pa_fdeep_chk:
-        ld a, (#_p_band_lo)
-        cp a, e
-        jr Z, pa_fdeep_band
-        jr NC, pa_fnext
-pa_fdeep_band:
-        ld a, (#_p_band_hi)
-        cp a, e
-        jr Z, pa_fnext
-        jr C, pa_fnext
-pa_fdeep:
-        ld (hl), #TILE_FRONT_DEEP
-        set 1, h
-        ld (hl), #0x0e
-        jr pa_fnext
-pa_fabove:
-        ; Line more than a tile below: this cell belongs to the surf wave. Inside the band the
-        ; surf pass just painted it; outside, it is far sea above the band or gradient below,
-        ; and is written in case the lane covered it last frame.
-        ld a, (#_p_band_lo)
-        cp a, e
-        jr Z, pa_fnext
-        jr NC, pa_fsky
-        ld a, (#_p_band_hi)
-        cp a, e
-        jr Z, pa_fgrad
-        jr NC, pa_fnext
-pa_fgrad:
-        ld a, e
-        ld d, #64
-        cp a, #96
-        jr C, pa_fgput
-        ld d, #65
-        cp a, #104
-        jr C, pa_fgput
-        ld d, #66
-pa_fgput:
-        ld (hl), d
-        set 1, h
-        ld (hl), #0x0e
-        jr pa_fnext
-pa_fsky:
-        ld (hl), #63
-        set 1, h
-        ld (hl), #0x0b
-pa_fnext:
-        res 1, h
-        ld a, l
-        add a, #32
-        ld l, a
-        jr NC, pa_fsame
-        inc h
-pa_fsame:
-        ld a, e
-        add a, #8
-        ld e, a
-        dec b
-        jp NZ, pa_floop
-pa_fdone:
-        ld a, (#_p_col)
-        inc a
-        ld c, a
-        cp a, #20
-        jp NZ, pa_col
         ret
     __endasm;
 }
 
 static void prepare_wave(uint16_t pixels) {
     uint16_t base = (uint16_t)(pixels & 511);
-    p_spray = (uint8_t)((world.tick >> 2) & 1);
     sample_heights(base);
     sample_front(base);
     paint_all();
@@ -1726,20 +1011,132 @@ static void shore_rebuild(void) {
     isl_rebuild = 0;
 }
 
+static void progress_cell(uint8_t row, uint8_t col, uint8_t tile) {
+    uint16_t offset = SHADOW_WAVE + (uint16_t)(7 + row) * 32 + col;
+    ((volatile uint8_t *)SHADOW_TILES)[offset] = tile;
+    ((volatile uint8_t *)SHADOW_ATTRS)[offset] = 0x80 | PAL_SKY;
+}
+
+static uint8_t progress_marker=255,progress_stage;
+static uint32_t progress_next,progress_step,progress_distance;
+static void prepare_progress(void) {
+    uint32_t distance=world.course_distance;
+    uint8_t marker, col, row, redraw;
+    if(distance>course_length)distance=course_length;
+    redraw=(uint8_t)(progress_marker==255 || world.stage!=progress_stage || distance<progress_distance);
+    marker=redraw?0:progress_marker;
+    if(redraw) {
+        progress_step=course_length/(PROGRESS_CELLS-1);
+        progress_next=progress_step;
+    }
+    while(marker<PROGRESS_CELLS-1 && distance>=progress_next) {
+        marker++;
+        progress_next=marker==PROGRESS_CELLS-2?course_length:progress_next+progress_step;
+    }
+    progress_distance=distance;
+    if(!redraw && marker==progress_marker)return;
+    progress_marker=marker;progress_stage=world.stage;
+    if(redraw) {
+    for (col = 0; col < COLS; col++) {
+        progress_cell(0, col, PROGRESS_FONT);
+        progress_cell(1, col, PROGRESS_FONT);
+    }
+    for(row=0;row<2;row++)for(col=0;col<2;col++) {
+        uint16_t offset=SHADOW_WAVE+(uint16_t)(7+row)*32;
+        progress_cell(row,col,(uint8_t)(row*2+col));
+        progress_cell(row,col+18,(uint8_t)(4+row*2+col));
+        ((volatile uint8_t *)SHADOW_ATTRS)[offset+col]=0x80|5;
+        ((volatile uint8_t *)SHADOW_ATTRS)[offset+col+18]=0x80|0;
+    }
+    progress_cell(1,5,PROGRESS_FONT+glyph('S'));
+    progress_cell(1,6,PROGRESS_FONT+glyph('T'));
+    progress_cell(1,7,PROGRESS_FONT+glyph('A'));
+    progress_cell(1,8,PROGRESS_FONT+glyph('G'));
+    progress_cell(1,9,PROGRESS_FONT+glyph('E'));
+    progress_cell(1,11,PROGRESS_FONT+TILE_DIGIT+world.stage/100);
+    progress_cell(1,12,PROGRESS_FONT+TILE_DIGIT+(world.stage/10)%10);
+    progress_cell(1,13,PROGRESS_FONT+TILE_DIGIT+world.stage%10);
+    }
+    for(col=0;col<PROGRESS_CELLS;col++) {
+        uint16_t offset=SHADOW_WAVE+7u*32u+col+2;
+        progress_cell(0,col+2,col==marker?PROGRESS_HEAD:PROGRESS_EMPTY);
+        if(col==marker)((volatile uint8_t *)SHADOW_ATTRS)[offset]=0x80;
+    }
+}
+
+static void shop_line(uint8_t row,const char *text) {
+    uint8_t col;
+    for(col=0;col<20;col++) {
+        uint16_t offset=SHADOW_WAVE+(uint16_t)(7+row)*32+col;
+        uint8_t tile=PROGRESS_FONT;
+        if(*text)tile=(uint8_t)(PROGRESS_FONT+glyph(*text++));
+        ((volatile uint8_t *)SHADOW_TILES)[offset]=tile;
+        ((volatile uint8_t *)SHADOW_ATTRS)[offset]=0x80|7;
+    }
+}
+
+static void prepare_shop_dialog(void) {
+    progress_marker=255;
+    if(shop_mode==SHOP_WALK) {
+        shop_line(0,shop_x>=SHOP_COUNTER_TALK_X*FP?"A TALK TO SHOPKEEPER":"WELCOME TO SURF SHOP");
+        shop_line(1,"WALK LEFT TO EXIT");
+    } else {
+        static const char *names[]={"CLASSIC FREE","LAGOON 4000 POINTS","FOREST 6000 POINTS","SUNSET 10000 POINTS"};
+        shop_line(0,names[shop_selected]);
+        shop_line(1,shop_message==SHOP_SHORT?"NOT ENOUGH POINTS":
+            shop_message==SHOP_BOUGHT?"BOUGHT  B BACK":
+            shop_message==SHOP_EQUIPPED?"EQUIPPED  B BACK":
+            (shop_owned&(1u<<shop_selected))?"A EQUIP   B BACK":"A BUY     B BACK");
+    }
+}
+
 void render_prepare(void) {
+    prepared_hud_icons=(uint8_t)(world.phase!=PHASE_SHOP);
+    static uint8_t was_beach;
     uint32_t pixels = (uint32_t)(world.scroll >> 6);
-    scx_sky = (uint8_t)(pixels >> 3);
-    scx_island = island_x(pixels);
-    if (isl_rebuild) shore_rebuild();
-    if (hud_changed()) {
+    uint32_t visual_pixels=world.visual_scroll>>6;
+    beach_prepare();
+    if(world.phase>=PHASE_BEACH_START || shop_scene)shop_prepare();
+    raster_sky = (uint8_t)(visual_pixels >> 3);
+    raster_playfield=beach_scx;
+    raster_beach=beach_active;
+    if(beach_active || world.phase==PHASE_SHOP) raster_island=0;
+    else {
+        if(was_beach) isl_valid=0;
+        raster_island=island_x(visual_pixels);
+        if(isl_rebuild) shore_rebuild();
+    }
+    was_beach=beach_active;
+    if (hud_changed() || world.phase==PHASE_SHOP || world.phase==PHASE_BEACH_START || world.phase==PHASE_BEACH_END) {
         prepare_hud();
         hud_commit();
-    } else if (world.phase == PHASE_PLAY && world.score != sd_value) {
+    } else if (world.phase == PHASE_PLAY && !RACING && world.score != sd_value) {
         write_score(world.score);
         score_commit();
     }
-    prepare_wave((uint16_t)pixels);
-    prepare_sprites();
+    if(world.phase==PHASE_SHOP) {
+        /* Rows 2-4 contain the room's repeating wooden wall, not a fixed sky.
+         * Apply the same fine camera offset to every interior band. The HUD
+         * remains fixed above y=16 and below y=128 in lcd_isr. */
+        raster_sky=raster_island=raster_playfield=shop_scroll;
+        raster_beach=1;
+    } else if (!beach_active) {
+        prepare_wave((uint16_t)pixels);
+    }
+    if(world.phase==PHASE_SHOP)prepare_shop_dialog();
+    else {
+        char top[32],bottom[32];
+        if(race_hud(top,bottom,1)) {
+            uint8_t row,col;
+            const char *s;
+            progress_marker=255;
+            for(row=0;row<2;row++) {
+                s=row?bottom:top;
+                for(col=0;col<COLS;col++)progress_cell(row,col,(uint8_t)(PROGRESS_FONT+glyph(*s?*s++:' ')));
+            }
+        } else prepare_progress();
+    }
+    sprites_prepare();
 }
 
 
@@ -1757,6 +1154,15 @@ void render_prepare(void) {
  * 1200 double-speed M-cycles, inside the ~2280 the blank offers, so nothing is ever written
  * while the LCD owns VRAM. */
 void render_present(void) {
+    uint8_t scene_change=(uint8_t)(beach_loading || shop_loading || (actor_pending&4));
+    uint8_t lcd_was_on=(uint8_t)(LCDC_REG&LCDCF_ON);
+    hud_icons=prepared_hud_icons;
+    /* Bulk scene swaps cannot fit a single VBlank. A brief blank is intentional:
+     * never tear the live VRAM or leave the raster and tilemap one frame apart. */
+    if(scene_change)LCDC_REG&=(uint8_t)~LCDCF_ON;
+    if(shop_loading || shop_palette_pending)shop_present();
+    if(beach_pending) beach_present();
+    if(actor_pending) actor_present();
     VBK_REG = 0;
     GDMA(SHADOW_TILES + SHADOW_HUD, 0x9800, 4);
     GDMA(SHADOW_TILES + SHADOW_WAVE, 0x9920, 2 * WAVE_ROWS);
@@ -1765,6 +1171,10 @@ void render_present(void) {
     GDMA(SHADOW_ATTRS + SHADOW_HUD, 0x9800, 4);
     GDMA(SHADOW_ATTRS + SHADOW_WAVE, 0x9920, 2 * WAVE_ROWS);
     GDMA(SHADOW_ATTRS + SHADOW_SHORE, 0x98A0, 8);
+    scx_sky=raster_sky;
+    scx_island=raster_island;
+    scx_playfield=raster_playfield;
+    scx_beach=raster_beach;
     VBK_REG = 0;
     /* The page just prepared becomes the one GBDK's VBL handler DMAs every frame; copy it now
      * too so sprites and map land in the same blank. The other page is free to build on.
@@ -1773,6 +1183,10 @@ void render_present(void) {
     _shadow_OAM_base = (uint8_t)((uint16_t)oam_back >> 8);
     __asm__("call .refresh_OAM");
     oam_back = (uint8_t *)((uint16_t)oam_back == OAM_PAGE_A ? OAM_PAGE_B : OAM_PAGE_A);
+    if(scene_change && lcd_was_on) {
+        SCX_REG=0;LYC_REG=16;
+        LCDC_REG|=LCDCF_ON;
+    }
 }
 
 /* Display is off, so VRAM can be filled directly. GBDK's tile copy ignores the VRAM bank bit. */
@@ -1787,17 +1201,19 @@ static void sprite_pals(void) {
     /* Six sprite palettes, colours 0 transparent. Kept here so the load does not depend on
      * which ROM bank the generated palette arrays landed in. */
     static const uint16_t pals[] = {
-        RGB(0, 0, 0),  RGB(0, 0, 0),   RGB(12, 5, 1),  RGB(9, 2, 4),
+        RGB(0, 0, 0),  RGB(0, 0, 0),   RGB(19, 11, 7), RGB(19, 0, 6),
         RGB(0, 0, 0),  RGB(6, 5, 4),   RGB(31, 31, 31), RGB(31, 20, 4),
         RGB(0, 0, 0),  RGB(17, 10, 1), RGB(31, 23, 4), RGB(31, 29, 17),
         RGB(0, 0, 0),  RGB(15, 2, 3),  RGB(29, 6, 7),  RGB(31, 31, 31),
         RGB(0, 0, 0),  RGB(2, 10, 18), RGB(22, 27, 30), RGB(31, 31, 31),
         RGB(0, 0, 0),  RGB(1, 4, 9),   RGB(29, 6, 7),  RGB(31, 31, 31),
+        RGB(0, 0, 0),  RGB(1, 3, 6),   RGB(17, 13, 9), RGB(3, 25, 24),
+        RGB(0, 0, 0),  RGB(10, 7, 9),  RGB(31, 28, 17), RGB(31, 31, 31),
     };
     const uint8_t *bytes = (const uint8_t *)pals;
     uint8_t i;
     OCPS_REG = 0x80;
-    for (i = 0; i < 48; i++) OCPD_REG = bytes[i];
+    for (i = 0; i < 64; i++) OCPD_REG = bytes[i];
 }
 
 static void lcd_off(void) {
@@ -1814,11 +1230,6 @@ void render_init(void) {
     uint16_t cell;
     uint8_t saved;
     oam_back = (uint8_t *)OAM_PAGE_A;
-    memset(pb_lo, 0, sizeof(pb_lo));
-    memset(pb_hi, WAVE_ROWS, sizeof(pb_hi));
-    /* Nothing of the lane is on the shadow yet: every row counts as left behind. */
-    memset(fb_lo, 0, sizeof(fb_lo));
-    memset(fb_hi, WAVE_ROWS, sizeof(fb_hi));
     memset((void *)OAM_PAGE_A, 0, 160);
     memset((void *)OAM_PAGE_B, 0, 160);
     lcd_off();
@@ -1834,6 +1245,23 @@ void render_init(void) {
     vram_copy(0, TILE_ARROW, arrow_tiles, (uint16_t)arrow_TILE_COUNT * 16u);
     vram_copy(0, TILE_POP, pop_tiles, (uint16_t)pop_TILE_COUNT * 16u);
     vram_copy(0, TILE_RAMP0, bg0_tiles, (uint16_t)bg0_TILE_COUNT * 16u);
+    /* Remap the existing font: background 0 -> pale 3, ink 1 -> blue 1.
+     * Both are nonzero, so BG priority keeps actors behind this fixed HUD. */
+    VBK_REG = 0;
+    for (cell = 0; cell < 42 * 8; cell++) {
+        uint16_t dest = 0x8000u + PROGRESS_FONT * 16u + cell * 2;
+        ((volatile uint8_t *)dest)[0] = (uint8_t)~bg_tiles[cell * 2 + 1];
+        ((volatile uint8_t *)dest)[1] = (uint8_t)~bg_tiles[cell * 2];
+    }
+    {
+        for (x = 0; x < 8; x++) {
+            uint16_t empty = 0x8000u + PROGRESS_EMPTY * 16u + x * 2;
+            uint8_t line = (x == 3 || x == 4) ? 0xff : 0;
+            ((volatile uint8_t *)empty)[0] = (uint8_t)~line;
+            ((volatile uint8_t *)empty)[1] = 0xff;
+        }
+    }
+    vram_copy(0,256,progress_patterns,sizeof(progress_patterns));
     set_bkg_palette(0, bg_PALETTE_COUNT, bg_palettes);
     sprite_pals();
     /* Page-aligned so the painter looks a tile's attribute byte up by loading L. */
@@ -1841,6 +1269,8 @@ void render_init(void) {
         ATTR_OF(cell) = (uint8_t)(bg_map_attributes[cell] | 0x08);
     }
     SWITCH_ROM(saved);
+
+    beach_init();
 
     for (x = 0; x < 32; x++) {
         put_bg(x, 2, TILE_SKY0);
@@ -1865,4 +1295,5 @@ void render_init(void) {
 
     /* Tile patterns live at 0x8000, so index 0 is the first pattern, not the signed 0x8800 set. */
     LCDC_REG = LCDCF_BG8000 | LCDCF_BG9800 | LCDCF_OBJ16 | LCDCF_OBJON | LCDCF_BGON;
+    shop_init();
 }

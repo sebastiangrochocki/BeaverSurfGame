@@ -4,3 +4,5 @@ gbc/build/
 web/*.ram
 web/*.srm
 .DS_Store
+__pycache__/
+*.py[cod]

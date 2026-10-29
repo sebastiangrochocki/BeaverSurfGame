@@ -71,8 +71,17 @@
 #define SPLASH_FRAMES 21
 
 #define START_HEARTS 6
+#define COURSE_FIRST_PX 4000UL
+#define COURSE_GROWTH_PX 500UL
+#define COURSE_STAGE_PX(stage) (COURSE_FIRST_PX + ((uint32_t)(stage) - 1UL) * COURSE_GROWTH_PX)
+#define BEACH_WALK_FRAMES 120
+#define BEACH_EXIT_FRAMES 120
+#define BEACH_START_X (48 * FP)
+#define BEACH_CAMERA_X (96 * FP)
+#define BEACH_WATER_X (192 * FP)
+#define BEACH_EXIT_X (120 * FP)
 #define INVULN_FRAMES 45
-#define RING_POINTS 50
+#define RING_POINTS 25
 #define GULL_AIR_SPEED FP
 /* Gull lane band (see beaver_sim GULL_Y_MIN/MAX) and the glide step in eighths of a pixel. */
 #define GULL_Y_MIN PX(48)
@@ -106,9 +115,20 @@
 #define INPUT_JUMP 4
 #define INPUT_DIVE 8
 #define INPUT_START 16
+#define INPUT_UP 32
+#define INPUT_DOWN 64
+#define INPUT_ACTION 128
 
-enum { PHASE_TITLE = 0, PHASE_PLAY = 1, PHASE_OVER = 2 };
-enum { BANNER_NONE = 0, BANNER_TRICK = 1, BANNER_WIPEOUT = 2, BANNER_HEART = 3 };
+enum {
+    PHASE_TITLE = 0,
+    PHASE_PLAY = 1,
+    PHASE_OVER = 2,
+    PHASE_BEACH_START = 3,
+    PHASE_BEACH_END = 4,
+    PHASE_SHOP = 5
+};
+enum { BANNER_NONE = 0, BANNER_TRICK = 1, BANNER_WIPEOUT = 2, BANNER_HEART = 3,
+    BANNER_LOW = 4, BANNER_COINS = 5, BANNER_HIT = 6, BANNER_CLEAN = 7 };
 
 typedef struct {
     int16_t x;
@@ -183,6 +203,14 @@ typedef struct {
     /* Difficulty tier (tick / 900, at most 8) kept incrementally to avoid a 32-bit divide. */
     uint8_t tier;
     uint16_t tier_ticks;
+    /* Course progress is separate from world scroll so each stage has a fixed distance. */
+    uint32_t course_distance;
+    uint16_t beach_timer;
+    uint8_t stage;
+    uint32_t visual_scroll;
+    uint16_t beach_pan;
+    uint8_t wave_scale;
+    uint8_t facing_left;
 } World;
 
 typedef struct {
@@ -195,6 +223,7 @@ typedef struct {
     uint8_t ring;
     uint8_t heart;
     uint8_t died;
+    uint8_t countdown;
 } Events;
 
 /* Size of the state record written by world_encode; matches beaver_sim::trace::STATE_LEN. */
@@ -203,6 +232,9 @@ typedef struct {
 /* The one world. A global so SDCC addresses every field directly; pointer-relative access
  * costs the SM83 several times more. */
 extern World world;
+/* Cached fixed-point target, shared by rules, coastline and progress HUD.
+ * Kept outside World so the established packed state/trace offsets stay intact. */
+extern uint32_t course_length;
 
 /* rules.c */
 void world_new(void) BANKED;
@@ -247,6 +279,7 @@ typedef struct FrontRide {
 int16_t front_at(int32_t world_x) BANKED;
 int16_t front_slope(int32_t world_x) BANKED;
 void front_ride(int32_t world_x, FrontRide *out) BANKED;
+void front_motion(int32_t world_x,FrontRide *out) BANKED;
 uint8_t front_jump_allowed(int32_t world_x) BANKED;
 uint8_t front_in_top_fifth(int32_t world_x) BANKED;
 int8_t front_jump_meter(int32_t world_x) BANKED;

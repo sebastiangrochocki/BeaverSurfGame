@@ -6,10 +6,16 @@
 #pragma bank 1
 #endif
 #include "rules.h"
+#include "actors.h"
+#include "shop.h"
+#include "surf.h"
+#include "race.h"
 
 #include <string.h>
 
 World world;
+uint32_t course_length;
+static uint8_t rival_stepping;
 #define W world
 
 static int16_t clamp16(int16_t v, int16_t lo, int16_t hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -86,11 +92,94 @@ void world_new(void) BANKED {
     W.meter = -1;
     W.hearts = START_HEARTS;
     W.phase = PHASE_TITLE;
+    W.stage = 1;
+    course_length = COURSE_STAGE_PX(1) * FP;
+    W.wave_scale = 16;
     W.gull_timer = gull_interval(0);
     W.ring_timer = ring_interval(0);
     W.rng = RNG_SEED;
+    surf_reset();
+    race_reset();
     sea_build(0, 0);
     W.beaver.y = sea_at(world_beaver_x());
+}
+
+static void start_stage(uint8_t stage) {
+    surf_reset();
+    race_reset();
+    W.phase = PHASE_BEACH_START;
+    W.stage = stage;
+    course_length = COURSE_STAGE_PX(stage) * FP;
+    W.beach_timer = 0;
+    W.course_distance = 0;
+    W.scroll = 0;
+    W.beach_pan = 0;
+    W.wave_scale = 0;
+    W.facing_left = 0;
+    W.stun = W.invuln = W.combo = W.banner = W.splash.present = 0;
+    memset(W.gull_present,0,sizeof W.gull_present);
+    memset(W.ring_present,0,sizeof W.ring_present);
+    W.heart_present=0;
+    W.gull_timer=gull_interval(stage>8?8:stage-1);
+    W.ring_timer=ring_interval(stage>8?8:stage-1);
+    W.beaver.x = BEACH_START_X;
+    W.beaver.y = HORIZON;
+    W.beaver.vx = 0;
+    W.beaver.vy = 0;
+    shop_direction=0;
+    W.beaver.airborne = 0;
+    W.beaver.lane = LANE_TOP;
+    W.beaver.lane_to = LANE_TOP;
+    W.speed = SCROLL_SPEED;
+    W.tier = stage > 8 ? 8 : (uint8_t)(stage - 1);
+    W.tier_ticks = 0;
+    sea_build(W.tick, W.tier);
+}
+
+static void beach_step(uint8_t ending, uint8_t input) {
+    W.tick++;
+    W.beaver.vx=0;
+    W.beaver.vy=0;
+    if ((input & INPUT_RIGHT) && !(input & INPUT_LEFT)) {
+        W.facing_left=0;
+        shop_direction=0;
+        if(!race_beach_blocked((int16_t)(W.beaver.x+W.beach_pan+FP),W.beaver.y)) {
+            W.beaver.vx=VEL;
+            if(W.beaver.x<BEACH_CAMERA_X) W.beaver.x+=FP;
+            else {W.beach_pan+=FP;W.visual_scroll+=FP;}
+        }
+    } else if ((input & INPUT_LEFT) && !(input & INPUT_RIGHT)) {
+        W.facing_left=1;
+        shop_direction=0;
+        if(!race_beach_blocked((int16_t)(W.beaver.x+W.beach_pan-FP),W.beaver.y)) {
+            if(W.beach_pan) {W.beach_pan-=FP;W.visual_scroll-=FP;W.beaver.vx=-VEL;}
+            else if(W.beaver.x>PX(24)) {W.beaver.x-=FP;W.beaver.vx=-VEL;}
+        }
+    }
+    if ((input & INPUT_UP) && !(input & INPUT_DOWN)) {
+        if(W.beaver.y>PX(104) && !race_beach_blocked((int16_t)(W.beaver.x+W.beach_pan),W.beaver.y-FP)) {W.beaver.y-=FP;W.beaver.vy=-VEL;}
+        shop_direction=2;
+    } else if ((input & INPUT_DOWN) && !(input & INPUT_UP)) {
+        if(W.beaver.y<PX(144) && !race_beach_blocked((int16_t)(W.beaver.x+W.beach_pan),W.beaver.y+FP)) {W.beaver.y+=FP;W.beaver.vy=VEL;}
+        shop_direction=1;
+    }
+    sea_refresh(W.tick, W.tier);
+    if(shop_beach(input)) return;
+    if (!ending && (uint16_t)W.beaver.x+W.beach_pan >= BEACH_WATER_X) {
+        W.phase = PHASE_PLAY;
+        W.beach_timer = 0;
+        W.course_distance = 0;
+        W.beaver.vx = 0;
+        W.beaver.vy = 0;
+        W.beaver.lane = W.beaver.y>=PX(126)?LANE_BOTTOM:LANE_TOP;
+        W.beaver.lane_to = W.beaver.lane;
+        W.beaver.y = lane_surface(world_beaver_x(),W.beaver.lane);
+        W.speed = (int16_t)(SCROLL_SPEED + (int16_t)(W.stage - 1) * 12);
+        race_begin_surf();
+    } else if (ending && W.beach_pan >= BEACH_EXIT_X) {
+        uint8_t next = W.stage == 255 ? 255 : (uint8_t)(W.stage + 1);
+        start_stage(next);
+    }
 }
 
 static void show(uint8_t banner, uint16_t points, uint8_t mult, uint8_t air) {
@@ -102,6 +191,7 @@ static void show(uint8_t banner, uint16_t points, uint8_t mult, uint8_t air) {
 }
 
 static void lose_half_heart(Events *events) {
+    if(RACING) {W.invuln=INVULN_FRAMES;return;}
     if (W.hearts > 0) W.hearts--;
     if (W.invuln < INVULN_FRAMES) W.invuln = INVULN_FRAMES;
     if (W.hearts == 0) {
@@ -203,20 +293,6 @@ static void splash_at(uint8_t big) {
     W.splash.big = big;
 }
 
-/* Leaves the top lane for the bottom one with a short hop. */
-static void hop_down(void) {
-    W.beaver.lane_to = LANE_BOTTOM;
-    W.beaver.cleared = 0;
-    W.beaver.flip = 0;
-    W.beaver.flips = 0;
-    W.beaver.perfect = 0;
-    W.beaver.air_time = 0;
-    W.beaver.rings = 0;
-    W.beaver.vy = HOP_VY;
-    W.beaver.airborne = 1;
-    W.beaver.y = (int16_t)(W.beaver.y + (W.beaver.vy >> 2));
-}
-
 static void settle(int16_t surface, uint8_t lane) {
     W.beaver.y = surface;
     W.beaver.vy = 0;
@@ -241,17 +317,17 @@ static void land(int16_t face, Events *events, uint8_t failed) {
         W.combo = 0;
         W.combo_timer = 0;
         W.speed = MIN_SPEED;
-        W.stun = WIPEOUT_FRAMES;
+        W.stun = RACING?12:WIPEOUT_FRAMES;
         show(BANNER_WIPEOUT, 0, 0, 0);
         splash_at(1);
         lose_half_heart(events);
-        if (W.invuln < WIPEOUT_FRAMES + INVULN_FRAMES) W.invuln = WIPEOUT_FRAMES + INVULN_FRAMES;
+        if (!RACING && W.invuln < WIPEOUT_FRAMES + INVULN_FRAMES) W.invuln = WIPEOUT_FRAMES + INVULN_FRAMES;
         return;
     }
     air_points = W.beaver.perfect ? (uint16_t)(W.beaver.air_time / AIR_FRAMES_PER_POINT) : 0;
     base = (uint16_t)(air_points + FLIP_POINTS * (uint16_t)flips);
     if (base > 0) {
-        uint8_t mult = (uint8_t)(1 + flips + W.beaver.rings);
+        uint8_t mult = (uint8_t)(1 + flips + (W.beaver.rings>3?3:W.beaver.rings));
         uint16_t points = (uint16_t)(base * (uint16_t)mult);
         events->trick = 1;
         W.speed = (int16_t)(W.speed + FLIP_SPEED * (int16_t)flips);
@@ -265,6 +341,7 @@ static void land(int16_t face, Events *events, uint8_t failed) {
         W.speed = (int16_t)(W.speed + VEL + (int16_t)W.combo * (VEL / 4));
         W.score = sat_add32(W.score, 10UL * W.combo);
         events->clean_landing = 1;
+        if(!events->trick)show(BANNER_CLEAN,10u*W.combo,W.combo,0);
     } else if (face < -FP) {
         W.combo = 0;
         W.speed = (int16_t)(W.speed * 4 / 5);
@@ -334,16 +411,6 @@ static void move_actors(int16_t scroll_step) {
             }
         }
     }
-    for (i = 0; i < RING_SLOTS; i++) {
-        if (!W.ring_present[i]) continue;
-        W.rings[i].x = (int16_t)(W.rings[i].x - scroll_step);
-        if (W.rings[i].x < PX(-24)) {
-            W.ring_present[i] = 0;
-            W.ring_lane[i] = LANE_TOP;
-        } else {
-            W.rings[i].y = (int16_t)(lane_surface(W.scroll + (int32_t)W.rings[i].x, W.ring_lane[i]) - RING_LIFT);
-        }
-    }
     if (W.heart_present) {
         W.heart.x = (int16_t)(W.heart.x - scroll_step);
         if (W.heart.x < PX(-24)) {
@@ -391,22 +458,12 @@ static void move_actors(int16_t scroll_step) {
 
     if (W.ring_timer > 0) W.ring_timer--;
     if (W.ring_timer == 0) {
-        int16_t x = PX(SCREEN_W + 24);
-        uint8_t hurt;
-        uint8_t lane = (uint8_t)(roll() & 1);
-        uint8_t slot;
         W.ring_timer = ring_interval(W.tier);
         W.ring_count++;
-        slot = spawn(W.ring_present, W.rings, RING_SLOTS, x,
-                     (int16_t)(lane_surface(W.scroll + (int32_t)x, lane) - RING_LIFT));
-        if (slot != 0xFF) W.ring_lane[slot] = lane;
-        hurt = W.hearts < START_HEARTS;
-        if (hurt && W.ring_count % HEART_EVERY_RINGS == 0 && !W.heart_present) {
-            x = (int16_t)(x + HEART_GAP);
-            W.heart_present = 1;
-            W.heart_lane = lane;
-            W.heart.x = x;
-            W.heart.y = (int16_t)(lane_surface(W.scroll + (int32_t)x, lane) - RING_LIFT);
+        if (W.hearts < START_HEARTS && W.ring_count % HEART_EVERY_RINGS == 0 && !W.heart_present) {
+            W.heart_present=1; W.heart_lane=(uint8_t)(W.ring_count&1);
+            W.heart.x=PX(264);
+            W.heart.y=(int16_t)(lane_surface(W.scroll+W.heart.x,W.heart_lane)-RING_LIFT);
         }
     }
 }
@@ -419,6 +476,11 @@ static uint8_t overlap(int16_t ax, int16_t ay, int16_t aw, int16_t ah, int16_t b
 
 static void spawn_gull(int16_t x, int8_t lane, int8_t glide, uint8_t turn) {
     uint8_t i;
+    /* One 32px gull is already four hardware sprites. Keep a single flight in
+     * the first GBC course so it cannot crowd the beaver, rings, and board. */
+    for (i = 0; i < GULL_SLOTS; i++) {
+        if (W.gull_present[i]) return;
+    }
     for (i = 0; i < GULL_SLOTS; i++) {
         if (!W.gull_present[i]) {
             W.gull_present[i] = 1;
@@ -431,70 +493,38 @@ static void spawn_gull(int16_t x, int8_t lane, int8_t glide, uint8_t turn) {
     }
 }
 
-static uint8_t touching_gull(uint8_t tucked) {
-    int16_t top = tucked ? PX(16) : PX(24);
-    int16_t tall = tucked ? PX(12) : PX(20);
-    int16_t bx = (int16_t)(W.beaver.x - PX(8));
-    int16_t by = (int16_t)(W.beaver.y - top);
+static uint8_t touching_gull(uint8_t input) {
     uint8_t i;
     for (i = 0; i < GULL_SLOTS; i++) {
         if (!W.gull_present[i]) continue;
-        if (overlap(bx, by, PX(16), tall, (int16_t)(W.gulls[i].x - PX(10)),
-                    (int16_t)(W.gulls[i].y - PX(3)), PX(20), PX(6)))
+        if ((surf_gull_shown&(1u<<i)) && actor_touches(input,RACING?ACTOR_RACE_GULL:ACTOR_GULL,W.gulls[i].x,W.gulls[i].y))
             return 1;
     }
     return 0;
 }
 
-static uint8_t touching_heart(void) {
+static uint8_t touching_heart(uint8_t input) {
     if (!W.heart_present) return 0;
-    return overlap((int16_t)(W.beaver.x - PX(8)), (int16_t)(W.beaver.y - PX(24)), PX(16), PX(20),
-                   (int16_t)(W.heart.x - PX(8)), (int16_t)(W.heart.y - PX(8)), PX(16), PX(16));
+    return actor_touches(input,ACTOR_HEART,W.heart.x,W.heart.y);
 }
 
-/* Score only when the jumping beaver's body passes through the hoop. */
-static uint8_t through_ring(void) {
-    int16_t cx = W.beaver.x;
-    int16_t cy = (int16_t)(W.beaver.y - PX(14));
-    uint8_t scored = 0;
-    uint8_t i;
-    if (!W.beaver.airborne) return 0;
-    for (i = 0; i < RING_SLOTS; i++) {
-        if (!W.ring_present[i]) continue;
-        if (abs16((int16_t)(cx - W.rings[i].x)) <= PX(10) &&
-            abs16((int16_t)(cy - W.rings[i].y)) <= PX(10)) {
-            W.ring_present[i] = 0;
-            W.ring_lane[i] = LANE_TOP;
-            scored = 1;
-        }
-    }
-    return scored;
-}
-
-static void simulate(uint8_t input, Events *events) {
-    int16_t scroll_step;
-    uint8_t jump_edge, dive_edge, double_down;
-    uint8_t stunned;
+static void rider_step(uint8_t input,Events *events) {
+    uint8_t jump_edge,dive_edge,down_edge,up_edge,stunned;
+    uint8_t jump=(input&INPUT_JUMP)!=0,dive=(input&INPUT_DIVE)!=0;
     Samples s;
-    int16_t surface = 0, face = 0;
+    int16_t surface=0,face=0,top;
     int32_t world_x;
-    int16_t top;
     uint8_t lane;
-    uint8_t jump = (input & INPUT_JUMP) != 0;
-    uint8_t dive = (input & INPUT_DIVE) != 0;
-
-    advance_tick();
-    sea_refresh(W.tick, W.tier);
-    scroll_step = (int16_t)(W.speed >> 2);
-    W.scroll += (int32_t)scroll_step;
-    if ((W.tick & 3) == 0) {
-        W.score = sat_add32(W.score, W.combo >= FLOW_COMBO ? 2 : 1);
-    }
     jump_edge = jump && !W.jump_held;
     W.jump_held = jump;
     dive_edge = (uint8_t)(dive && !W.dive_held);
     W.dive_held = dive;
-    double_down = (uint8_t)(dive_edge && W.down_tap > 0);
+    down_edge=(uint8_t)((input&INPUT_DOWN) && !surf_down_held);
+    up_edge=(uint8_t)((input&INPUT_UP) && !surf_up_held);
+    surf_down_held=(uint8_t)(input&INPUT_DOWN);
+    surf_up_held=(uint8_t)(input&INPUT_UP);
+    if(jump_edge && !W.beaver.airborne)surf_jump_buffer=6;
+    else if(surf_jump_buffer)surf_jump_buffer--;
     if (dive_edge) W.down_tap = DOUBLE_TAP;
     else if (W.down_tap > 0) W.down_tap--;
     if (jump_edge) W.up_tap = DOUBLE_TAP;
@@ -506,13 +536,23 @@ static void simulate(uint8_t input, Events *events) {
 
     stunned = W.stun > 0;
     if (stunned) W.stun--;
+    if (W.course_distance > course_length - 128UL * FP) {
+        /* Calm-water approach: merge either lane smoothly before reaching sand.
+         * Running normal ride physics here would snap the lower lane upward. */
+        W.beaver.x += clamp16((int16_t)(BEACH_CAMERA_X - W.beaver.x), -FP, FP);
+        W.beaver.y += clamp16((int16_t)(HORIZON - W.beaver.y), -FP/2, FP/2);
+        W.beaver.vx = W.beaver.vy = 0;
+        W.beaver.airborne = W.beaver.flip = 0;
+        W.beaver.lane = W.beaver.lane_to = LANE_TOP;
+    } else {
     steer(stunned ? 0 : input);
 
     world_x = world_beaver_x();
     lane = W.beaver.lane;
     if (lane == LANE_BOTTOM && W.beaver.airborne) {
         surface = front_at(world_x);
-        face = lane_slope(world_x, LANE_BOTTOM);
+    } else if(W.beaver.airborne) {
+        surface=sea_at(world_x);
     } else if (lane != LANE_BOTTOM) {
         sea_sample(world_x, &s);
         surface = s.here;
@@ -522,14 +562,15 @@ static void simulate(uint8_t input, Events *events) {
     if (W.beaver.airborne) {
         uint8_t climbing, dropping;
         int16_t bottom;
-        top = sea_at(world_x);
-        if (jump_edge && W.beaver.flip == 0 && W.beaver.lane == W.beaver.lane_to) {
-            if (W.beaver.lane == LANE_BOTTOM) {
+        top = lane==LANE_TOP?surface:sea_at(world_x);
+        if (down_edge && W.beaver.lane_to == LANE_TOP) {
+                W.beaver.lane_to=LANE_BOTTOM;
+        } else if (up_edge && W.beaver.lane == LANE_BOTTOM && W.beaver.vy<0 && !W.beaver.flip) {
                 W.beaver.lane_to = LANE_TOP;
                 W.beaver.cleared = 0;
-            } else {
-                W.beaver.flip = FLIP_FRAMES;
-            }
+        } else if (jump_edge && !(input&(INPUT_UP|INPUT_DOWN)) && W.beaver.flip == 0 && W.beaver.lane == W.beaver.lane_to) {
+            if(surf_flip_safe())W.beaver.flip = FLIP_FRAMES;
+            else show(BANNER_LOW,0,0,0);
         }
         if (W.beaver.flip > 0) {
             W.beaver.flip--;
@@ -539,12 +580,8 @@ static void simulate(uint8_t input, Events *events) {
         W.beaver.vy = (int16_t)(W.beaver.vy + ((dive && W.beaver.lane == W.beaver.lane_to) ? DIVE_GRAVITY : GRAVITY));
         W.beaver.y = (int16_t)(W.beaver.y + (W.beaver.vy >> 2));
         climbing = (uint8_t)(W.beaver.lane == LANE_BOTTOM && W.beaver.lane_to == LANE_TOP);
-        if (double_down && W.beaver.lane == LANE_TOP && W.beaver.lane_to == LANE_TOP && W.beaver.vy > 0) {
-            int16_t gap = (int16_t)(top - W.beaver.y);
-            if (gap >= 0 && gap < DROP_WINDOW) W.beaver.lane_to = LANE_BOTTOM;
-        }
         dropping = (uint8_t)(W.beaver.lane == LANE_TOP && W.beaver.lane_to == LANE_BOTTOM);
-        bottom = front_at(world_x);
+        bottom = lane==LANE_BOTTOM?surface:dropping?front_at(world_x):0;
         if (climbing && W.beaver.y < top) W.beaver.cleared = 1;
         if (climbing && W.beaver.cleared && W.beaver.y >= top && W.beaver.vy > 0) {
             settle(top, LANE_TOP);
@@ -557,55 +594,144 @@ static void simulate(uint8_t input, Events *events) {
             land(lane_slope(world_x, LANE_BOTTOM), events, 1);
         } else if (!dropping && !climbing && W.beaver.y >= surface && W.beaver.vy > 0) {
             settle(surface, lane);
-            land(face, events, 0);
+            land(lane_slope(world_x,lane), events, 0);
         }
     } else {
         uint8_t allowed;
         int8_t meter;
         if (lane == LANE_BOTTOM) {
             FrontRide ride;
-            front_ride(world_x, &ride);
+            if(rival_stepping)front_motion(world_x,&ride);
+            else front_ride(world_x, &ride);
             surface = ride.surface;
             face = ride.slope;
             allowed = ride.allowed;
             meter = ride.meter;
         } else {
             allowed = sea_jump_allowed_s(&s);
-            meter = sea_jump_meter_s(&s);
+            meter = rival_stepping?0:sea_jump_meter_s(&s);
         }
         W.beaver.y = surface;
         W.beaver.vy = 0;
         ride(face, input);
-        glide_meter(meter);
-        if (!stunned && double_down && lane == LANE_TOP) {
-            hop_down();
-        } else if (jump && !stunned && allowed) {
+        if(!rival_stepping)glide_meter(meter);
+        if ((jump || surf_jump_buffer) && !stunned && allowed) {
             launch(world_x, input);
+            if(lane==LANE_TOP && (input&INPUT_DOWN))W.beaver.lane_to=LANE_BOTTOM;
+            surf_jump_buffer=0;
             events->jumped = 1;
         }
     }
 
+    }
     W.speed = clamp16(W.speed, MIN_SPEED, world_max_speed());
+}
+
+/* Exchange only compact rider state, never World, the course or its clock.
+ * Both racers execute exactly the same movement/landing/flip code above. */
+static void exchange_rider(void) {
+    Beaver b=W.beaver;
+    uint32_t score=W.score;
+    int16_t speed=W.speed;
+    uint8_t v;
+    uint16_t v16;
+    RiderState *r=&race.rival;
+    W.beaver=r->beaver;r->beaver=b;
+    W.score=r->score;r->score=score;
+    W.speed=r->speed;r->speed=speed;
+#define SWAP8(f) v=(uint8_t)W.f;W.f=r->f;r->f=v
+#define SWAP16(f) v16=W.f;W.f=r->f;r->f=v16
+    SWAP8(combo);SWAP16(combo_timer);SWAP8(meter);SWAP8(stun);SWAP8(invuln);
+    SWAP8(banner);SWAP16(banner_points);SWAP8(banner_mult);SWAP8(banner_air);SWAP8(banner_timer);
+    SWAP8(jump_held);SWAP8(dive_held);SWAP8(down_tap);SWAP8(up_tap);
+#undef SWAP8
+#undef SWAP16
+    v=surf_jump_buffer;surf_jump_buffer=r->buffer;r->buffer=v;
+    v=surf_up_held;surf_up_held=r->up;r->up=v;
+    v=surf_down_held;surf_down_held=r->down;r->down=v;
+}
+static void check_hit(uint8_t input,Events *events) {
+    if(W.invuln)W.invuln--;
+    else if(W.phase==PHASE_PLAY && touching_gull(input)) {
+        events->hit=1;W.score=W.score>=50?W.score-50:0;
+        W.combo=0;W.combo_timer=0;show(BANNER_HIT,50,0,0);lose_half_heart(events);
+    }
+}
+void world_rival_step(uint8_t input,Events *events) BANKED {
+    Splash saved=W.splash;
+    memset(events,0,sizeof *events);
+    exchange_rider();rival_stepping=1;rider_step(input,events);rival_stepping=0;
+    check_hit(input,events);exchange_rider();
+    W.splash=saved;
+}
+static void simulate(uint8_t input, Events *events) {
+    int16_t scroll_step;
+
+    advance_tick();
+    {
+        uint8_t scale=16,exit_scale=16;
+        if(W.course_distance<256UL*FP) {
+            uint16_t distance=(uint16_t)(W.course_distance>>6);
+            scale=distance<128?0:(uint8_t)((distance-128)>>3);
+        }
+        if(W.course_distance>course_length-384UL*FP) {
+            uint16_t remaining=W.course_distance<course_length?
+                (uint16_t)((course_length-W.course_distance)>>6):0;
+            exit_scale=remaining<128?0:(uint8_t)((remaining-128)>>4);
+        }
+        W.wave_scale=scale<exit_scale?scale:exit_scale;
+    }
+    sea_refresh(W.tick, W.tier);
+    scroll_step = RACING?PX(2):(int16_t)(W.speed >> 2);
+    W.scroll += (int32_t)scroll_step;
+    W.visual_scroll += (uint16_t)scroll_step;
+    W.course_distance = sat_add32(W.course_distance, (uint32_t)(scroll_step > 0 ? scroll_step : 0));
+    if (!RACING && (W.tick & 3) == 0) {
+        W.score = sat_add32(W.score, W.combo >= FLOW_COMBO ? 2 : 1);
+    }
+    rider_step(input,events);
     age_splash(scroll_step);
-    move_actors(scroll_step);
-    if (W.invuln > 0) {
-        W.invuln--;
-    } else if (W.phase == PHASE_PLAY && touching_gull((uint8_t)(dive && W.beaver.flip == 0 && !double_down))) {
-        events->hit = 1;
-        lose_half_heart(events);
+    if(RACING) { /* Sequential race targets are scheduled after the shared pickup move. */ }
+    else if(W.course_distance>256UL*FP && W.course_distance<course_length-384UL*FP) move_actors(scroll_step);
+    else { memset(W.gull_present,0,sizeof W.gull_present);memset(W.ring_present,0,sizeof W.ring_present);W.heart_present=0; }
+    surf_tick(scroll_step,RACING);
+    if(RACING)race_targets(scroll_step);
+    check_hit(input,events);
+    {
+        uint8_t other=0,n,npc_input=0;
+        Events npc_events;
+        if(RACING) {npc_input=race_ai();world_rival_step(npc_input,&npc_events);}
+        n=surf_collect(RACING?&race.rival.beaver:0,input,npc_input,&other);
+        if(n) {
+            W.score=sat_add32(W.score,(uint32_t)n*RING_POINTS);events->ring=n;
+            if(W.beaver.airborne)W.beaver.rings=sat_add8(W.beaver.rings,n);
+            if(W.banner!=BANNER_TRICK && W.banner!=BANNER_HIT)show(BANNER_COINS,(uint16_t)n*RING_POINTS,n,0);
+        }
+        if(RACING) {
+            race.rival.score=sat_add32(race.rival.score,(uint32_t)other*RING_POINTS);
+            if(race.rival.beaver.airborne)race.rival.beaver.rings=sat_add8(race.rival.beaver.rings,other);
+            npc_events.ring=other;race_record(&npc_events,1);race_record(events,0);
+        }
     }
-    if (through_ring()) {
-        W.score = sat_add32(W.score, RING_POINTS);
-        events->ring = 1;
-        if (W.beaver.airborne) W.beaver.rings = sat_add8(W.beaver.rings, 1);
-    }
-    if (touching_heart()) {
+    if (touching_heart(input)) {
         W.heart_present = 0;
         W.heart_lane = LANE_TOP;
         W.hearts = (uint8_t)(W.hearts + 1);
         if (W.hearts > START_HEARTS) W.hearts = START_HEARTS;
         show(BANNER_HEART, 0, 0, 0);
         events->heart = 1;
+    }
+    if (W.course_distance >= course_length) {
+        W.phase = PHASE_BEACH_END;
+        W.beach_timer = 0;
+        W.beach_pan=0;
+        W.course_distance=course_length;
+        W.wave_scale=0;
+        W.beaver.x = BEACH_CAMERA_X;
+        W.beaver.vx = 0;
+        W.beaver.airborne = 0;
+        W.beaver.y = HORIZON;
+        race_finish();
     }
 }
 
@@ -614,16 +740,19 @@ void world_step(uint8_t input, Events *events) BANKED {
     uint8_t start_edge = start && !W.start_held;
     memset(events, 0, sizeof(Events));
     W.start_held = start;
+    if(race_beach(input,events))return;
+    if(race.state==RACE_RUNIN)input=INPUT_RIGHT;
 
     switch (W.phase) {
     case PHASE_TITLE:
         W.tick++;
         W.scroll += (int32_t)(SCROLL_SPEED >> 2);
+        W.visual_scroll += SCROLL_SPEED >> 2;
         if (start_edge) {
             uint32_t best = W.best;
             world_new();
             W.best = best;
-            W.phase = PHASE_PLAY;
+            start_stage(1);
             W.start_held = start;
         }
         sea_refresh(W.tick, 0);
@@ -637,6 +766,15 @@ void world_step(uint8_t input, Events *events) BANKED {
             W.tier_ticks = 0;
             sea_build(0, 0);
         }
+        break;
+    case PHASE_BEACH_START:
+        beach_step(0, input);
+        break;
+    case PHASE_BEACH_END:
+        beach_step(1, input);
+        break;
+    case PHASE_SHOP:
+        shop_step(input);
         break;
     default:
         simulate(input, events);

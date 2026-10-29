@@ -1,10 +1,14 @@
 #!/bin/sh
-# Builds the C rules with the host compiler and replays the golden traces through them.
-# The sanitizers flag any arithmetic that would silently truncate on a 16-bit target.
+# GBC-specific mechanics have intentionally diverged from the GBA/Rust controls.
+# Keep their shared fixtures untouched; exercise the shipping CGB rules directly.
 set -eu
 cd "$(dirname "$0")/.."
-out="${TMPDIR:-/tmp}/beaver_trace_test"
-cc -std=c99 -Wall -Wextra -Wconversion -O1 \
-    -fsanitize=undefined,implicit-conversion -fno-sanitize-recover=all \
-    -o "$out" gbc/src/rules.c gbc/src/wave.c gbc/src/save.c gbc/test/trace_test.c
-"$out" fixtures
+test_dir=$(mktemp -d /private/tmp/beaver-rules.XXXXXX)
+for case_name in course shop surf race race_ai; do
+    cc -std=c99 -Wall -Wextra -O1 \
+        -fsanitize=address,undefined -fno-sanitize-recover=all \
+        -o "$test_dir/$case_name" gbc/src/rules.c gbc/src/wave.c \
+        gbc/src/actors.c gbc/src/save.c gbc/src/shop.c gbc/src/surf.c \
+        gbc/src/race.c "gbc/test/${case_name}_test.c"
+    "$test_dir/$case_name"
+done

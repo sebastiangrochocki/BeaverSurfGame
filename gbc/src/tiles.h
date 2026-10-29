@@ -25,13 +25,13 @@
 #define TILE_SPRAY      67
 #define TILE_FRONT_DEEP 69
 #define TILE_RAMP       70
-#define TILE_RAMP_COUNT 162
-#define TILE_RAMP1_COUNT 162
+#define TILE_RAMP_COUNT 191
+#define TILE_RAMP1_COUNT 186
 #define TILE_RAMP0      194
-#define TILE_COUNT      232
+#define TILE_COUNT      256
 
 /* Far-shore scenery, VRAM bank 0 after the ramps (see scenery_tiles in gen_assets). */
-#define TILE_SCENE      232
+#define TILE_SCENE      199
 #define SC_LAND_TOP     (TILE_SCENE + 0)
 #define SC_LAND         (TILE_SCENE + 1)
 #define SC_LAND_TOP_L   (TILE_SCENE + 2)
