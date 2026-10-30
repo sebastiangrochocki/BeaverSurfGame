@@ -89,3 +89,113 @@ existing per-tick glide; physical jump timing and lane contacts stay exact at
 line against the actual wave table across both halves of its 1024px period.
 The native wave-physics sweep covers stages 1-9, speed/momentum takeoff lift,
 early jumps, held-Up transfers and real landings on the upper surface.
+
+## Checklist for future changes
+
+Treat the allocations below as project reservations, not as a list of all RAM
+or tiles the hardware offers. Check the linked map and generated asset counts
+again whenever code, artwork, compiler flags or GBDK versions change.
+
+### Display and CPU budgets
+
+- Count both total OAM objects (40) and objects crossing each scanline (10).
+  Our two racers already use eight objects on an overlapping row; a ring uses
+  the remaining two. Admit whole actors and keep gameplay collisions consistent
+  with which actors were actually displayed.
+- Budget CPU work and VRAM transfers separately. A legal tile allocation can
+  still glitch if its upload runs beyond VBlank. Include palette work, bank
+  switches, DMA stalls and OAM copying in that budget.
+- Keep ordinary scene uploads in VBlank; blank the LCD during VBlank before
+  bulk scene replacement. Do not write palettes during pixel fetch. Preserve
+  the HUD/footer raster boundaries and reset SCX/LYC every VBlank.
+- Keep simulation/audio near 60 ticks per second independently of presentation.
+  Measure presented frames, longest gaps and `frames_dropped`, not the host
+  emulator's speed counter. Current race/lower-lane regression floors are 20
+  presented FPS, at most six refreshes between presentations, and zero dropped
+  simulation ticks. These are minimum guards, not a claim of 60 FPS rendering.
+- Avoid adding a per-tick scan, division, banked sample walk or copied structure
+  without timing it. Cache display-only work separately from physical decisions.
+  Preserve the bounded four-tick queue and test both riders when changing it.
+
+### Reserved memory and artwork
+
+| Region | Current use / rule |
+| --- | --- |
+| ROM bank 0 | Fixed code, interrupts and safe wave-bank reader |
+| ROM banks 1-7 | Rules, wave reference, assets and scene/actor/race code; inspect source bank pragmas before adding code |
+| ROM banks 8-25 | Exact wave refresh cache: nine tiers, two 16KB banks per tier |
+| Cartridge | 512KB MBC5 ROM, 8KB battery RAM; preserve BVR1/BVS1 save formats |
+| Ordinary WRAM below C500 | Linked data currently ends at C49C; recheck `s__HEAP` after every build |
+| C500-C58F / C590-C61F | Original / staged beach background patterns |
+| C630-C6EF | Shop top-row backup |
+| C700-C717 | Timing-test delay stub only; keep clear or relocate the helper when reserving new memory |
+| C900-C9FF / CA00-CAFF | Alternating OAM pages |
+| CB00-CBFF | Background attribute lookup |
+| CC00-CDFF / CE00-CFFF | Shadow tile / attribute maps |
+| D000-D3FF / D400-D7FF | Original / staged beach actor patterns |
+| D800-D87F / D880-D8FF | Player / rival lower-body composite caches |
+| D900-DCFF | Shop backup of surfing ramp patterns; leave stack headroom above it |
+| VRAM bank 0, tiles 160-163 / 164-171 | Small ring / independent rival composite |
+| VRAM bank 1, tiles 70-255 | Main ramp allocation; first 64 slots are temporarily reused on foot and restored for surfing |
+| VRAM bank 0, tiles 194 onward | Ramp overflow, scenery and font; use generated counts and compile-time fit assertions, not assumed spare space |
+
+The shop's existing 64-pattern scene slot holds 38 room patterns, 18 palm
+patterns and two flag patterns. The palm and flag are background stamps and
+consume no OAM objects. Background palettes are also scene-dependent: beach
+sand uses 3, open water 4, shoreline animation 6 and palm 7. Shop interiors and
+surfing reuse palettes, so preserve and restore their actual loaded values.
+The HUD borrows palettes 0 and 5 for its footer; retain the raster restoration.
+
+The two VRAM banks are not one interchangeable tile pool. Tile index, bank bit,
+palette and signed/unsigned addressing mode must agree. In particular, the
+footer changes addressing mode and hides actors; verify the first HUD row and
+line 128 when changing it. Keep the 126-byte trace format and packed World
+layout intact, or update every assembly offset assertion and test fixture that
+reads it.
+
+### Lessons from failed approaches
+
+| Approach / assumption | What went wrong | Keep instead |
+| --- | --- | --- |
+| Count tiles and assume hardware safety | Legal tile counts did not prevent top-row corruption from late uploads | Time all transfer paths, including beach palette/pose changes |
+| Drain every owed race tick before drawing | Two-rider CPU demand repeatedly postponed presentation, reproducing about 2 FPS | Bound catch-up before race drawing and service ticks while a frame waits for VBlank |
+| Recalculate periodic waves on the SM83 | Repeated arithmetic consumed the CPU budget | Bake exact samples into ROM and verify them against the C reference |
+| Trust emulator DMA timing alone | Unmodified PyBoy copied GDMA data without charging its CPU stall | Run the timing helper and still test a physical cartridge |
+| Put the timing stub at D900 | It overlaps the shop's ramp backup | Reserve C700 for the helper and audit absolute addresses |
+| Rescale every sample during lower-meter crest searches | Display-only calculations slowed lower-lane play | Search raw samples, shape endpoints and cache the visible target for four ticks |
+| Wrap both wave drawings at 512px | The lower lane's 1024px physical period no longer matched its drawing | Retain the full lower-lane phase and test both halves |
+| Multiply taller lower waves directly in signed 16-bit math | Larger intermediate products can overflow even if the final height fits | Reduce fractional precision before multiplication; test extreme tiers |
+| Increase difficulty by time, then reset by stage | A long first crossing could become harder than the next stage | Use the stage tier consistently, capped at eight |
+
+### Verification before shipping
+
+Build first so the ROM, map, NoICE symbols and assembler listings describe the
+same binary. Tests install emulator fixtures at safe simulation/render boundaries;
+do not overwrite World while a rider exchange is partly complete.
+
+| Change | Required checks from repository root |
+| --- | --- |
+| Any GBC rules change | `sh tools/check_gbc.sh` (address/undefined-behavior sanitizers) |
+| Any shipping ROM | `python3 tools/check_header.py web/beaver.gbc` |
+| Waves, bank layout or memory | `python3 tools/test_gbc_wave_runtime.py`, plus `test_gbc_lower_wave.py` |
+| Scheduling, DMA, palettes, scene loading | `test_gbc_hardware.py`, `test_gbc_shore.py`, `test_gbc_shore_palette.py`, `test_gbc_shop.py`, `test_gbc_progress.py` |
+| Sprites, collision or controls | `test_gbc_frames.py`, `test_gbc_actors.py`, `test_gbc_collisions.py`, `test_gbc_controls.py`, `test_gbc_flips.py` |
+| Rival or destination beach | `test_gbc_race.py`, `test_gbc_finish_beach.py`, and the hardware timing test |
+
+All `test_gbc_*.py` names above are under `tools/`; run them with a Python
+environment containing PyBoy and Pillow. Build with the project's GBDK 4.5.0
+setup, or re-establish the timing baseline when upgrading the toolchain. Follow
+[SURF_RACE.md](SURF_RACE.md#verification) for example commands. Include stages
+1, 2, 3, 8/9 and 255, both lanes and scrolling wraps in relevant coverage.
+When changing generated assets, regenerate them and check the tile bounds.
+Rebuild `web/beaver.gbc`, update its browser cache key when its bytes change,
+and confirm the preview serves that ROM. A fresh source build should reproduce
+the shipping ROM; do not rely only on an incremental build.
+
+Finally test the resulting ROM on real GBC hardware: start-beach walking and
+vertical poses; shop entry/exit and palette restoration; a paid race with both
+riders, rings, flips and pause/results; lower-to-upper transfers; later wave
+tiers; and the finish flag, far shoreline and next-stage entry. Look for top-row
+corruption, footer seams, sprite flicker, missing actors and long visual stalls.
+Record the ROM/commit and hardware used. Emulator checks establish a regression
+baseline; they cannot certify every cartridge, display or physical timing path.
