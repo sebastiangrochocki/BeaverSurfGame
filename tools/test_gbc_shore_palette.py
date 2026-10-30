@@ -43,7 +43,7 @@ def main():
         cells=bytes(mem[0x98C0+y*32+x] for y in range(10) for x in range(20))
         mem[0xFF4F]=previous_bank
         for tile,attr in zip(cells,attrs):
-            expected=3 if tile==50 or tile>=70 else 6 if tile in (55,56,57,62) else 4
+            expected=7 if 108<=tile<126 and attr&8 else 3 if tile==50 or tile>=70 else 6 if tile in (55,56,57,62) else 4
             assert attr&7==expected,f'palette animation leaked: tile {tile}, palette {attr&7}, expected {expected}'
         if phase==3:
             observations['frame']=(state,palettes,patterns,cells,attrs)

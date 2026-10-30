@@ -33,6 +33,7 @@ def main():
         tap('a');assert m[r+67]==1,'offer did not open'
         p.screen.image.save('/private/tmp/beaver-race-offer.png')
         tap('left');tap('a');assert m[r+67]==2,'offer not accepted'
+        assert m[r+79]==80 and m[addr('race_challenges')]==1,'first rival challenge must use 80% aim'
         assert get(r+43,4)==2000 and get(base+101,4)==0,'stake charged incorrectly'
         p.screen.image.save('/private/tmp/beaver-race-countdown.png')
         for _ in range(500):
@@ -55,8 +56,8 @@ def main():
             saw_target|=bool(targets)
             if frame==600:
                 p.screen.image.save('/private/tmp/beaver-race-surfing.png')
-                tap('start');snapshot=bytes(m[base:base+272])+bytes(m[r:r+79]);p.tick(40)
-                assert snapshot==bytes(m[base:base+272])+bytes(m[r:r+79]),'pause advanced a racer/course'
+                tap('start');snapshot=bytes(m[base:base+272])+bytes(m[r:r+81]);p.tick(40)
+                assert snapshot==bytes(m[base:base+272])+bytes(m[r:r+81]),'pause advanced a racer/course'
                 tap('start');paused=True
         assert m[r+67]==5,'race did not show results'
         assert dual>100 and saw_target and paused

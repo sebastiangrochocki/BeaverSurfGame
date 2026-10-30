@@ -98,7 +98,7 @@ def main():
         assert drop_count()==0,'idle start beach dropped ticks'
         assert list(mem[world+257:world+261])==[0]*4
         assert_single_horizon()
-        assert mem[0x98C0]==50, "expected supplied sand at native y=48"
+        assert mem[0x9943]==50, "expected supplied sand below the palm/house at native x24/y80"
         assert mem[0x98CE]==55, "expected supplied shoreline top at native x=112, y=48"
         assert mem[0x98EE]==57, "expected supplied shoreline bottom at native y=56"
         assert any(136<=mem[0xFE02+i*4]<168 for i in range(40)), "missing supplied carrying pose"
@@ -187,7 +187,13 @@ def main():
         pyboy.tick(130)
         pyboy.button_release("right")
         pyboy.tick(20)
-        assert mem[world + 109] == 3, "expected waiting on next beach"
+        assert mem[world + 109] == 4, "the extended beach ended before the far water"
+        pyboy.button_press("right")
+        for _ in range(1000):
+            pyboy.tick()
+            if mem[world+109]==1:break
+        pyboy.button_release("right");pyboy.tick(20)
+        assert mem[world+109]==1, "outgoing water did not start the next stage"
         assert mem[world + 263] == 2, "stage did not increment"
         assert_single_horizon()
         assert head_position(mem)==0, "next-stage head did not reset"
@@ -204,7 +210,9 @@ def main():
         for i in range(4):mem[world+257+i]=((4499*64)>>(i*8))&255
         pyboy.tick(30)
         assert mem[world+109]==4
-        assert list(mem[0x9825:0x982e])==[32,33,14,20,18,0,4,4,6],'top label must read STAGE 002'
+        text='NEXT STAGE 003'
+        glyphs=[0 if c==' ' else 4+int(c) if c.isdigit() else 14+ord(c)-ord('A') for c in text]
+        assert list(mem[0x9820:0x9834])==[0]*3+glyphs+[0]*3,'top label must read NEXT STAGE 003'
         pyboy.screen.image.save('/private/tmp/beaver-stage-002.png')
         print("Supplied landmarks, 8x8 head, stage label/reset, 4000/4500 lengths, palette isolation, beach flow and zero dropped ticks pass")
     finally:

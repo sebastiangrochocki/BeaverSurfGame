@@ -32,6 +32,36 @@ static void settlement(uint32_t player,uint32_t npc,uint16_t payout) {
     step(INPUT_ACTION);assert(race.state==RACE_RESULTS);
     step(0);step(INPUT_ACTION);assert(race.state==RACE_DONE);
 }
+static void precision_progression(void) {
+    uint8_t attempt;
+    beach(3000);
+    for(attempt=0;attempt<5;attempt++) {
+        uint8_t expected=(uint8_t)(80+(attempt<2?attempt:2)*10);
+        world.phase=PHASE_BEACH_START;world.score=3000;
+        world.beaver.x=PX(144);world.beaver.y=PX(136);
+        race_reset(); /* A new beach keeps the accepted challenge count. */
+        assert(race.precision==expected && race_challenges==attempt);
+        step(INPUT_ACTION);step(INPUT_LEFT);step(INPUT_ACTION);
+        assert(race.state==RACE_COUNTDOWN && race.precision==expected);
+        assert(race_challenges==attempt+1);
+        step(INPUT_ACTION);assert(race_challenges==attempt+1);
+    }
+    world_new();assert(!race_challenges && race.precision==80);
+}
+static void finish_beach_challenge(void) {
+    beach(999);world.phase=PHASE_BEACH_END;world.stage=1;
+    world.beaver.x=PX(96);world.beach_pan=PX(168);world.beaver.y=PX(136);
+    assert(race_near());
+    step(INPUT_ACTION);step(INPUT_LEFT);step(INPUT_ACTION);
+    assert(race.state==RACE_OFFER && race.short_funds && world.stage==1 && !race_challenges);
+    world.score=3000;step(0);step(INPUT_ACTION);
+    assert(world.stage==2 && world.phase==PHASE_BEACH_START && race.state==RACE_COUNTDOWN);
+    assert(race.wallet==2000 && !world.score && race.precision==80 && race_challenges==1);
+    until_surf();assert(RACING && course_length==4500UL*FP);
+    world.phase=PHASE_BEACH_END;race_finish();
+    step(0);step(INPUT_ACTION);step(0);step(INPUT_ACTION);
+    world_next_stage_beach();assert(race_challenges==1 && race.precision==90);
+}
 int main(void) {
     uint32_t start,distance;
     uint8_t other,n;
@@ -57,8 +87,8 @@ int main(void) {
     assert(!race_near()); /* Shop doorway wins over the expanded talk reach. */
     beach(3000);step(INPUT_UP);assert(world.beaver.y<PX(136)); /* Escape old overlap safely. */
     beach(1000);step(INPUT_ACTION);step(INPUT_DIVE);
-    assert(race.state==RACE_IDLE && world.score==1000);
-    accept_race(999);assert(race.state==RACE_OFFER && race.short_funds && world.score==999);
+    assert(race.state==RACE_IDLE && world.score==1000 && !race_challenges);
+    accept_race(999);assert(race.state==RACE_OFFER && race.short_funds && world.score==999 && !race_challenges);
     accept_race(1000);assert(race.state==RACE_COUNTDOWN && !world.score && !race.wallet);
     start=world.beaver.x;for(t=0;t<179;t++)step(INPUT_RIGHT|INPUT_ACTION);
     assert(world.beaver.x==start && race.state==RACE_COUNTDOWN);
@@ -85,5 +115,7 @@ int main(void) {
     assert(peaks && race.state==RACE_RESULTS && world.hearts==1);
     assert(race_hud(top,bottom,0) && strlen(top)<=20 && strlen(bottom)<32);
     settlement(400,200,2000);settlement(200,400,0);settlement(300,300,1000);
+    precision_progression();
+    finish_beach_challenge();
     puts("Race: offers/cancel/funds, single escrow, countdown lock, aligned run-in, shared clock, no passive income, contested ties, sequential targets, full duel/no KO, health restore, all payouts and held-A/idempotent result flow pass");
 }

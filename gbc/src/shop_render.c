@@ -6,6 +6,9 @@
 #include "beach.h"
 #include "tiles.h"
 #include "shop_data.h"
+#include "bg0.h"
+#define EXTERIOR_FONT (TILE_RAMP0 + bg0_TILE_COUNT)
+typedef char exterior_tiles_fit[(SHOP_FLAG_EDGE<64 && EXTERIOR_FONT+TILE_DIGIT+9<256)?1:-1];
 
 /* The 64 ramp patterns are unused on foot. Restore their exact bytes for surfing.
  * D800-D87F is the actor cache; the stack is at E000, above this D900-DCFF slot. */
@@ -70,9 +73,34 @@ void shop_exterior(uint8_t scx) BANKED {
         int16_t c=col+3+x;
         if(c>=0 && c<=20) {
             uint16_t offset=0x160u+2u*32u+(uint8_t)c;
-            ((volatile uint8_t *)0xCC00u)[offset]=(uint8_t)(213+letters[x]);
+            ((volatile uint8_t *)0xCC00u)[offset]=(uint8_t)(EXTERIOR_FONT+letters[x]);
             ((volatile uint8_t *)0xCE00u)[offset]=3;
         }
+    }
+    /* One cached background stamp beside the house; the shared palm palette
+     * is installed with the beach scene, never in the per-frame raster. */
+    for(y=0;y<6;y++)for(x=0;x<3;x++) {
+        int16_t c=col+(world.phase==PHASE_BEACH_END?11:-3)+x;
+        if(c>=0 && c<=20)cell((uint8_t)(6+y),(uint8_t)c,(uint8_t)(SHOP_PALM_PATTERN+y*3+x),7);
+    }
+    if(world.phase==PHASE_BEACH_END) {
+        int16_t pole=col+15,c;
+        uint8_t number=world.stage==255?255:(uint8_t)(world.stage+1),digits[3],count=0;
+        if(pole>20 || pole+4<0)return;
+        if(number>=100) {digits[count++]=number/100;number%=100;}
+        if(count || number>=10) {digits[count++]=number/10;number%=10;}
+        digits[count++]=number;
+        if(pole>=0 && pole<=20)for(y=9;y<14;y++)cell(y,(uint8_t)pole,SHOP_FLAG_POLE,PAL_ISLAND);
+        for(x=0;x<count;x++) {
+            c=pole+1+x;
+            if(c>=0 && c<=20) {
+                uint16_t offset=0x40u+(uint8_t)c;
+                ((volatile uint8_t *)0xCC00u)[offset]=(uint8_t)(EXTERIOR_FONT+TILE_DIGIT+digits[x]);
+                ((volatile uint8_t *)0xCE00u)[offset]=PAL_ISLAND;
+            }
+        }
+        c=pole+1+count;
+        if(c>=0 && c<=20)cell(9,(uint8_t)c,SHOP_FLAG_EDGE,PAL_ISLAND);
     }
 }
 

@@ -42,11 +42,12 @@ static int16_t pickup_y(uint8_t i) {
 }
 void surf_tick(int16_t step,uint8_t racing) BANKED {
     uint8_t i,j,count,flags,slot;
+    uint8_t limit=racing?1:PICKUP_SLOTS;
     for(i=0;i<POP_SLOTS;i++)if(pickup_pops[i].life)pickup_pops[i].life--;
     if(world.course_distance<=256UL*FP || world.course_distance>=course_length-384UL*FP) {
         surf_clear();return;
     }
-    for(i=0;i<PICKUP_SLOTS;i++)if(pickups[i].flags&PICKUP_PRESENT) {
+    for(i=0;i<limit;i++)if(pickups[i].flags&PICKUP_PRESENT) {
         pickups[i].x-=step;
         if(pickups[i].x<PX(-24))pickups[i].flags=0;
         else if(((world.tick+i)&3)==0)pickups[i].y=pickup_y(i);
@@ -67,15 +68,16 @@ void surf_tick(int16_t step,uint8_t racing) BANKED {
     }
     /* Keep the legacy three-slot trace meaningful without changing its wire layout. */
     memset(world.ring_present,0,sizeof world.ring_present);
-    for(i=0,j=0;i<PICKUP_SLOTS && j<RING_SLOTS;i++)if(pickups[i].flags&PICKUP_PRESENT) {
+    for(i=0,j=0;i<limit && j<RING_SLOTS;i++)if(pickups[i].flags&PICKUP_PRESENT) {
         world.ring_present[j]=1;world.rings[j].x=pickups[i].x;world.rings[j].y=pickups[i].y;
         world.ring_lane[j++]=(pickups[i].flags&PICKUP_BOTTOM)?1:0;
     }
 }
 uint8_t surf_collect(const Beaver *rival,uint8_t input,uint8_t rival_input,uint8_t *rival_count) BANKED {
     uint8_t i,n=0;
+    uint8_t limit=rival?1:PICKUP_SLOTS;
     *rival_count=0;
-    for(i=0;i<PICKUP_SLOTS;i++)if((pickups[i].flags&(PICKUP_PRESENT|PICKUP_SHOWN))==(PICKUP_PRESENT|PICKUP_SHOWN)) {
+    for(i=0;i<limit;i++)if((pickups[i].flags&(PICKUP_PRESENT|PICKUP_SHOWN))==(PICKUP_PRESENT|PICKUP_SHOWN)) {
         int16_t dx=(int16_t)(pickups[i].x-world.beaver.x),dy=(int16_t)(pickups[i].y-world.beaver.y);
         uint8_t a=(uint8_t)(dx>-PX(42) && dx<PX(42) && dy>-PX(48) && dy<PX(48) && actor_pickup_touches(&world.beaver,input,pickups[i].x,pickups[i].y));
         uint8_t b=0;

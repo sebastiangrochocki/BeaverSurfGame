@@ -358,8 +358,8 @@ static void draw_rival(uint8_t walking) {
     uint8_t mirror=0,frame,base,prop=6,deck=BOARD_FLAT;
     if(world.phase==PHASE_SHOP)return;
     if(race.state==RACE_IDLE || race.state==RACE_OFFER) {
-        if(world.phase!=PHASE_BEACH_START || world.stage<2)return;
-        x=view_x((int16_t)(RIVAL_BEACH_X-(world.beach_pan>>6)));y=view_y(RIVAL_BEACH_Y);
+        if(world.phase!=PHASE_BEACH_END && (world.phase!=PHASE_BEACH_START || world.stage<2))return;
+        x=view_x((int16_t)((world.phase==PHASE_BEACH_END?RIVAL_FINISH_X:RIVAL_BEACH_X)-(int16_t)(world.beach_pan>>6)));y=view_y(RIVAL_BEACH_Y);
     } else if(race.state==RACE_RUNIN) {
         x=view_x((int16_t)(world.beaver.x>>6));y=view_y(140);
     } else if(RACING || race.state==RACE_COUNTDOWN || race.state==RACE_RESULTS) {

@@ -15,6 +15,7 @@ uint16_t shop_price(uint8_t board) BANKED {
 }
 
 uint8_t shop_near_door(void) BANKED {
+    if(world.beach_pan>384u*FP)return 0; /* Beyond the house; avoid signed-Q6 wrap. */
     int16_t x=(int16_t)(world.beaver.x+world.beach_pan);
     int16_t door=world.phase==PHASE_BEACH_END?PX(180):PX(96);
     return (uint8_t)(x>=door-PX(14) && x<=door+PX(14) && world.beaver.y<=PX(112));

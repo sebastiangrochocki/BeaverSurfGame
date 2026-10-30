@@ -6,25 +6,33 @@
 #include "surf.h"
 #include "shop.h"
 RaceState race;
+uint8_t race_challenges;
 static uint32_t add32(uint32_t a,uint32_t b) {return a>0xffffffffUL-b?0xffffffffUL:a+b;}
-void race_reset(void) BANKED {memset(&race,0,sizeof race);}
+static uint8_t next_precision(void) {return (uint8_t)(80+(race_challenges<2?race_challenges:2)*10);}
+void race_reset(void) BANKED {
+    memset(&race,0,sizeof race);
+    race.precision=next_precision();
+}
 uint8_t race_near(void) BANKED {
+    int16_t rival=world.phase==PHASE_BEACH_END?PX(RIVAL_FINISH_X):PX(RIVAL_BEACH_X);
     int16_t x=(int16_t)(world.beaver.x+world.beach_pan);
-    return (uint8_t)(world.phase==PHASE_BEACH_START && world.stage>=2 && race.state==RACE_IDLE &&
-        x>=PX(RIVAL_BEACH_X-52) && x<=PX(RIVAL_BEACH_X+52) && world.beaver.y>=PX(RIVAL_BEACH_Y-28) && !shop_near_door());
+    if(world.beach_pan>384u*FP)return 0;
+    return (uint8_t)((world.phase==PHASE_BEACH_END || (world.phase==PHASE_BEACH_START && world.stage>=2)) && race.state==RACE_IDLE &&
+        x>=rival-PX(52) && x<=rival+PX(52) && world.beaver.y>=PX(RIVAL_BEACH_Y-28) && !shop_near_door());
 }
 static int16_t magnitude(int16_t n) {return n<0?(int16_t)-n:n;}
 uint8_t race_beach_blocked(int16_t x,int16_t y) BANKED {
     int16_t dx,dy,old_dx,old_dy;
-    if(world.phase!=PHASE_BEACH_START || world.stage<2 ||
+    int16_t rival=world.phase==PHASE_BEACH_END?PX(RIVAL_FINISH_X):PX(RIVAL_BEACH_X);
+    if(world.beach_pan>384u*FP || (world.phase!=PHASE_BEACH_END && (world.phase!=PHASE_BEACH_START || world.stage<2)) ||
        (race.state!=RACE_IDLE && race.state!=RACE_OFFER))return 0;
     /* Stable union of the walking art: 32 native pixels wide, 24 ink rows high.
      * X uses 3:2 rules/native scaling; transparent bottom eight rows stay free.
      * Resolve proposed axes separately so walking along the edge still slides. */
-    dx=magnitude((int16_t)(x-PX(RIVAL_BEACH_X)));
+    dx=magnitude((int16_t)(x-rival));
     dy=magnitude((int16_t)(y-PX(RIVAL_BEACH_Y)));
     if(dx>=PX(48) || dy>=PX(24))return 0;
-    old_dx=magnitude((int16_t)(world.beaver.x+world.beach_pan-PX(RIVAL_BEACH_X)));
+    old_dx=magnitude((int16_t)(world.beaver.x+world.beach_pan-rival));
     old_dy=magnitude((int16_t)(world.beaver.y-PX(RIVAL_BEACH_Y)));
     /* Old saves/test fixtures may start overlapped: allow only outward escape. */
     if(old_dx<PX(48) && old_dy<PX(24) && dx+dy>old_dx+old_dy)return 0;
@@ -32,6 +40,11 @@ uint8_t race_beach_blocked(int16_t x,int16_t y) BANKED {
 }
 static void accept(void) {
     if(world.score<1000) {race.short_funds=1;return;}
+    /* The normal exit starts the next crossing directly. A finish-beach duel
+     * instead stages that upcoming crossing at its race starting line. */
+    if(world.phase==PHASE_BEACH_END)world_next_stage_beach();
+    race.precision=next_precision();race.ai_accuracy=0;
+    if(race_challenges<255)race_challenges++;
     if(world.score>world.best)world.best=world.score;
     race.wallet=world.score-1000;world.score=0;
     race.saved_health=world.hearts;race.state=RACE_COUNTDOWN;race.timer=180;
@@ -96,23 +109,18 @@ void race_begin_surf(void) BANKED {
 /* The next target enters only after the previous one has left or been collected.
  * This is deliberately quieter than solo play: 4+4 rider objects + 2 target objects. */
 void race_targets(int16_t step) BANKED {
-    uint8_t i,occupied=0;
+    uint8_t occupied=0;
+    (void)step;
     world.heart_present=0;
-    for(i=0;i<GULL_SLOTS;i++)if(world.gull_present[i]) {
-        world.gulls[i].x-=(int16_t)(step+GULL_AIR_SPEED);
-        if(world.gulls[i].x<PX(-24))world.gull_present[i]=0;else occupied=1;
-    }
-    for(i=0;i<PICKUP_SLOTS;i++)if(pickups[i].flags&PICKUP_PRESENT)occupied=1;
+    memset(world.gull_present,0,sizeof world.gull_present);
+    if(pickups[0].flags&PICKUP_PRESENT)occupied=1;
     if(world.course_distance<=256UL*FP || world.course_distance>=course_length-384UL*FP) {
         memset(world.gull_present,0,sizeof world.gull_present);return;
     }
     if(occupied)return;
     if(race.timer) {race.timer--;return;}
     race.timer=12;
-    if((race.sequence&7)==5) {
-        world.gull_present[0]=1;world.gulls[0].x=PX(264);
-        world.gulls[0].y=(int16_t)(GULL_Y_MIN+(int16_t)((race.sequence>>3)&3)*PX(8));
-    } else {
+    {
         pickups[0].x=PX(264);
         pickups[0].flags=(uint8_t)(PICKUP_PRESENT|((race.sequence&1)?PICKUP_BOTTOM:0)|
             ((race.sequence&7)==6?PICKUP_HIGH:0)|(world.stage>=3?PICKUP_BOB:0));
@@ -129,8 +137,6 @@ uint8_t race_ai(void) BANKED {
     if(pickups[0].flags&PICKUP_PRESENT && pickups[0].x>=0 && pickups[0].x<=PX(240)) {
         visible=race.sequence; x=pickups[0].x;y=pickups[0].y;
         lane=(pickups[0].flags&PICKUP_BOTTOM)?LANE_BOTTOM:LANE_TOP;
-    } else if(world.gull_present[0] && world.gulls[0].x>=0 && world.gulls[0].x<=PX(240)) {
-        visible=race.sequence;x=world.gulls[0].x;y=world.gulls[0].y;
     }
     if(visible!=race.ai_seen) {
         race.ai_seen=visible;race.ai_wait=(uint8_t)(12+(race.sequence&3));race.ai_think=0;
@@ -143,15 +149,18 @@ uint8_t race_ai(void) BANKED {
         return race.ai_input;
     }
     race.ai_think=7;
+    /* Carry the accuracy budget: 80/90/100 precise plans per hundred.
+     * A missed plan coasts for this eight-tick interval instead of perfectly
+     * correcting toward a ring, changing lanes or requesting a trick. */
+    race.ai_accuracy=(uint8_t)(race.ai_accuracy+race.precision);
+    if(race.ai_accuracy<100) {race.ai_input=0;return 0;}
+    race.ai_accuracy-=100;
     if(!b->airborne)race.ai_flip=0;
     dx=(int16_t)(x-b->x);
     if(visible!=255) {
         if(dx>PX(12))input|=INPUT_RIGHT;
         else if(dx<PX(-12))input|=INPUT_LEFT;
-        if(world.gull_present[0]) {
-            /* Tuck only when an approaching gull actually threatens this rider. */
-            if(dx<PX(70) && dx>PX(-36) && y>b->y-PX(40) && y<b->y)input|=INPUT_DIVE;
-        } else {
+        {
             if(lane==LANE_BOTTOM && b->lane_to==LANE_TOP) {
                 if(!b->airborne)input|=INPUT_JUMP;
                 else input|=INPUT_DOWN|INPUT_DIVE;
@@ -168,7 +177,7 @@ uint8_t race_ai(void) BANKED {
         if(b->x>patrol+PX(5))input|=INPUT_LEFT;
         else if(b->x<patrol-PX(5))input|=INPUT_RIGHT;
     }
-    /* Crest timing and flip requests use the same safety guard as human inputs. */
+    /* Crest timing and flip requests use the NPC's conservative landing forecast. */
     if(!b->airborne && !(input&INPUT_DIVE)) {
         int32_t wx=world.scroll+b->x;
         uint8_t crest;
@@ -222,7 +231,10 @@ uint8_t race_hud(char *top,char *bottom,uint8_t footer) BANKED {
         else {strcpy(top,"RACE FOR POINTS");strcpy(bottom,"LEFT YES  RIGHT NO");}
     } else if(race.state==RACE_COUNTDOWN) {
         if(!footer) {strcpy(top,"READY TO RACE");strcpy(bottom,race.timer>120?"3":race.timer>60?"2":"1");}
-        else {strcpy(top,"MOST POINTS WINS");strcpy(bottom,"RINGS 25  GULLS 50");}
+        else {
+            strcpy(top,"RIVAL AIM ");number(top+10,race.precision);strcat(top," PCT");
+            strcpy(bottom,"RINGS FLIPS AND AIR");
+        }
     } else if(race.state==RACE_RUNIN) {
         strcpy(top,footer?"MOST POINTS WINS":"GO");strcpy(bottom,footer?"JUMP THEN UP TO CLIMB":"RUN TO THE WATER");
     } else if(RACING) {

@@ -6,6 +6,7 @@
 #include "actors.h"
 #include "actor_data.h"
 #include "race.h"
+#include <string.h>
 
 uint8_t actor_pending;
 #ifdef __SDCC
@@ -36,7 +37,6 @@ uint8_t actor_pose(uint8_t input,uint8_t *mirror) BANKED {
 
 void actor_prepare(uint8_t frame, uint8_t deck) BANKED {
 #ifdef __SDCC
-    uint8_t i;
     const uint8_t *source;
     lower_wanted=(uint8_t)((frame==255?21:frame*3)+(deck>>3));
     race_wanted=RACING;
@@ -44,19 +44,18 @@ void actor_prepare(uint8_t frame, uint8_t deck) BANKED {
     actor_pending=(uint8_t)((lower_wanted!=lower_committed?1:0)|(race_wanted!=race_loaded?4:0));
     if(!(actor_pending&1)) return;
     source=actor_lower+(uint16_t)lower_wanted*128;
-    for(i=0;i<128;i++) lower_stage[i]=source[i];
+    memcpy(lower_stage,source,128);
 #else
     (void)frame;(void)deck;
 #endif
 }
 void actor_prepare_rival(uint8_t frame,uint8_t deck) BANKED {
 #ifdef __SDCC
-    uint8_t i;
     const uint8_t *source;
     rival_wanted=(uint8_t)((frame==255?21:frame*3)+(deck>>3));
     if(rival_wanted==rival_committed)return;
     actor_pending|=2;source=actor_lower+(uint16_t)rival_wanted*128;
-    for(i=0;i<128;i++)rival_stage[i]=source[i];
+    memcpy(rival_stage,source,128);
 #else
     (void)frame;(void)deck;
 #endif

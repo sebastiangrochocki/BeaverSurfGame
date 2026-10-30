@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 test_dir=$(mktemp -d /private/tmp/beaver-rules.XXXXXX)
-for case_name in course shop surf race race_ai; do
+for case_name in course shop surf race race_ai wave_physics; do
     cc -std=c99 -Wall -Wextra -O1 \
         -fsanitize=address,undefined -fno-sanitize-recover=all \
         -o "$test_dir/$case_name" gbc/src/rules.c gbc/src/wave.c \

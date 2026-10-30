@@ -75,6 +75,12 @@ extern volatile uint8_t scx_beach;
 /* Prepared raster state belongs to the shadow map, not the frame still visible.
  * Commit both together in VBlank, especially when SCX wraps from 7 to 0. */
 static uint8_t raster_sky, raster_island, raster_playfield, raster_beach;
+#define DIRTY_HUD 1
+#define DIRTY_WAVE 2
+#define DIRTY_SHORE 4
+#define DIRTY_FOOTER 8
+static uint8_t prepared_bands;
+static uint8_t shore_first,shore_count;
 
 /* Fixed WRAM above GBDK's data (which ends well under 0xC900; see build/beaver.map).
  *
@@ -191,7 +197,7 @@ hp_write_island:
 typedef struct {
     uint32_t score, best;
     uint16_t banner_points;
-    uint8_t phase, blink, hearts, stage, banner, banner_air, banner_mult, combo, combo_hot, pause;
+    uint8_t phase, blink, hearts, stage, banner, banner_air, banner_mult, combo, combo_hot, pause, beach_hint;
 } HudState;
 static HudState hud_last;
 static uint8_t hud_valid;
@@ -211,6 +217,8 @@ static uint8_t hud_changed(void) {
     now.combo = world.combo;
     now.combo_hot = world.combo_timer > 90;
     now.pause = pause_show;
+    now.beach_hint=(world.phase==PHASE_BEACH_START || world.phase==PHASE_BEACH_END)?
+        (shop_near_door()?1:race_near()?2:(uint8_t)(3+((world.tick>>6)&1))):0;
     if (hud_valid && memcmp(&now, &hud_last, sizeof now) == 0) return 0;
     hud_last = now;
     hud_valid = 1;
@@ -330,6 +338,7 @@ static void score_commit(void) {
     uint8_t i;
     volatile uint8_t *tiles = (volatile uint8_t *)(SHADOW_TILES + SHADOW_HUD + 14);
     volatile uint8_t *attrs = (volatile uint8_t *)(SHADOW_ATTRS + SHADOW_HUD + 14);
+    prepared_bands|=DIRTY_HUD;
     for (i = 0; i < 6; i++) {
         uint8_t tile = sd_digits[i];
         tiles[i] = tile;
@@ -473,11 +482,13 @@ static void prepare_hud(void) {
     if (world.phase == PHASE_BEACH_END) {
         center_text(0, "BEACH CLEAR");
         if(shop_near_door())center_text(1,"A ENTER SURF SHOP");
+        else if(race_near())center_text(1,"A TALK TO RIVAL");
         else {
-            strcpy(text,"STAGE 000");
-            text[6]=(char)('0'+world.stage/100);
-            text[7]=(char)('0'+(world.stage/10)%10);
-            text[8]=(char)('0'+world.stage%10);
+            uint8_t next=world.stage==255?255:(uint8_t)(world.stage+1);
+            strcpy(text,"NEXT STAGE 000");
+            text[11]=(char)('0'+next/100);
+            text[12]=(char)('0'+(next/10)%10);
+            text[13]=(char)('0'+next%10);
             center_text(1,text);
         }
         return;
@@ -515,7 +526,7 @@ static uint8_t *sl_out;
  * the same table lerp as the rules (le_core in wave.c): h0 + ((h1 - h0) * frac >> 3). Heights
  * stay in 0..16383, so the pixel row is the byte straddling bits 6..13.
  * sl_front = 0: screen y = row - 24, clamped to 0..200 (the surf line).
- * sl_front = 1: screen y = 116 + (row - 112) * front_num / 16, the bottom lane. The caller
+ * sl_front = 1: the shaped lower crest/trough scaled by front_num/16. The caller
  * passes (world_x >> 1) + FRONT_PHASE so this matches front_at.
  * The height table is world+117; heights_at_117 fails the build if the struct moves. */
 static void sample_line(uint16_t px, uint8_t *out) __naked {
@@ -619,13 +630,21 @@ sl_fr:
         rlca
         sbc a, a
         ld h, a
+        bit 7, h
+        jr NZ, sl_crest
+        sra h
+        rr l
+        sra h
+        rr l
+sl_crest:
         ld e, l
         ld d, h
         add hl, hl
-        add hl, hl
         add hl, de
+        add hl, hl
+        add hl, hl
         ld a, (#_front_num)
-        sub a, #5
+        sub a, #12
         jr Z, sl_scaled
 sl_more:
         add hl, de
@@ -641,6 +660,12 @@ sl_scaled:
         sra h
         rr l
         ld a, l
+        bit 7, h
+        jr NZ, sl_add
+        cp a, #11
+        jr C, sl_add
+        ld a, #10
+sl_add:
         add a, #116
         jr sl_store
 sl_store:
@@ -700,6 +725,7 @@ static void sample_front(uint16_t base) {
 /* One tile-map pass over both waves. The shared ramps contain the complete 23px
  * depth profile, so shade boundaries move with each surface. Tile pixels stay static. */
 static uint8_t p_col, p_fronttop;
+static uint8_t p_mainheight,p_frontheight;
 static uint16_t p_mainlut, p_frontlut;
 
 static void paint_all(void) __naked {
@@ -714,6 +740,8 @@ wg_col:
         add hl, de
         ld a, (hl+)
         ld c, a
+        add a, #32
+        ld (#_p_mainheight), a
         ld a, (hl)
         sub a, c
         call wg_lut
@@ -728,6 +756,8 @@ wg_col:
         add hl, de
         ld a, (hl+)
         ld c, a
+        add a, #32
+        ld (#_p_frontheight), a
         ld a, (hl)
         cp a, c
         jr C, wg_frontmin
@@ -756,28 +786,13 @@ wg_row:
         jr C, wg_front
         jr Z, wg_front
         ld hl, #_p_mainlut
-        ld a, (#_p_col)
-        ld c, a
-        push hl
-        ld hl, #_hy
+        ld a, (#_p_mainheight)
         jr wg_sample
 wg_front:
         ld hl, #_p_frontlut
-        ld a, (#_p_col)
-        ld c, a
-        push hl
-        ld hl, #_fy
+        ld a, (#_p_frontheight)
 wg_sample:
-        ld a, l
-        add a, c
-        ld l, a
-        jr NC, wg_sampleok
-        inc h
-wg_sampleok:
-        ld a, (hl)
-        add a, #32
         sub a, e
-        pop hl
         cp a, #RAMP_SUB_COUNT
         jr NC, wg_solid
         add a, (hl)
@@ -864,9 +879,8 @@ wg_clamped:
 }
 
 static void prepare_wave(uint16_t pixels) {
-    uint16_t base = (uint16_t)(pixels & 511);
-    sample_heights(base);
-    sample_front(base);
+    sample_heights((uint16_t)(pixels&511));
+    sample_front(pixels);
     paint_all();
 }
 
@@ -952,6 +966,10 @@ static void write_scene_column(uint8_t col) {
     volatile uint8_t *tiles = (volatile uint8_t *)(SHADOW_TILES + SHADOW_SHORE + (col & 31));
     volatile uint8_t *attrs = (volatile uint8_t *)(SHADOW_ATTRS + SHADOW_SHORE + (col & 31));
     uint8_t row;
+    if(!shore_count)shore_first=col&31;
+    else if(((shore_first+shore_count)&31)!=(col&31))shore_count=32;
+    if(shore_count<32)shore_count++;
+    prepared_bands|=DIRTY_SHORE;
     for (row = 0; row < 4; row++) {
         tiles[row * 32] = KIND_TILES[kind][row];
         attrs[row * 32] = KIND_ATTRS[kind][row];
@@ -1013,6 +1031,7 @@ static void shore_rebuild(void) {
 
 static void progress_cell(uint8_t row, uint8_t col, uint8_t tile) {
     uint16_t offset = SHADOW_WAVE + (uint16_t)(7 + row) * 32 + col;
+    prepared_bands|=DIRTY_FOOTER;
     ((volatile uint8_t *)SHADOW_TILES)[offset] = tile;
     ((volatile uint8_t *)SHADOW_ATTRS)[offset] = 0x80 | PAL_SKY;
 }
@@ -1066,6 +1085,7 @@ static void prepare_progress(void) {
 
 static void shop_line(uint8_t row,const char *text) {
     uint8_t col;
+    prepared_bands|=DIRTY_FOOTER;
     for(col=0;col<20;col++) {
         uint16_t offset=SHADOW_WAVE+(uint16_t)(7+row)*32+col;
         uint8_t tile=PROGRESS_FONT;
@@ -1095,7 +1115,10 @@ void render_prepare(void) {
     static uint8_t was_beach;
     uint32_t pixels = (uint32_t)(world.scroll >> 6);
     uint32_t visual_pixels=world.visual_scroll>>6;
+    prepared_bands=0;
+    shore_count=0;
     beach_prepare();
+    if(beach_map_dirty) {prepared_bands|=DIRTY_WAVE|DIRTY_SHORE;shore_count=32;}
     if(world.phase>=PHASE_BEACH_START || shop_scene)shop_prepare();
     raster_sky = (uint8_t)(visual_pixels >> 3);
     raster_playfield=beach_scx;
@@ -1107,9 +1130,10 @@ void render_prepare(void) {
         if(isl_rebuild) shore_rebuild();
     }
     was_beach=beach_active;
-    if (hud_changed() || world.phase==PHASE_SHOP || world.phase==PHASE_BEACH_START || world.phase==PHASE_BEACH_END) {
+    if (hud_changed() || world.phase==PHASE_SHOP) {
         prepare_hud();
         hud_commit();
+        prepared_bands|=DIRTY_HUD;
     } else if (world.phase == PHASE_PLAY && !RACING && world.score != sd_value) {
         write_score(world.score);
         score_commit();
@@ -1120,8 +1144,11 @@ void render_prepare(void) {
          * remains fixed above y=16 and below y=128 in lcd_isr. */
         raster_sky=raster_island=raster_playfield=shop_scroll;
         raster_beach=1;
+        prepared_bands|=DIRTY_WAVE|DIRTY_SHORE;
+        shore_count=32;
     } else if (!beach_active) {
         prepare_wave((uint16_t)pixels);
+        prepared_bands|=DIRTY_WAVE;
     }
     if(world.phase==PHASE_SHOP)prepare_shop_dialog();
     else {
@@ -1150,9 +1177,28 @@ void render_prepare(void) {
         HDMA5_REG = (uint8_t)((blocks) - 1);        \
     } while (0)
 
-/* Call at the start of vblank (or with the LCD off). 60 DMA blocks and one OAM DMA take about
- * 1200 double-speed M-cycles, inside the ~2280 the blank offers, so nothing is ever written
- * while the LCD owns VRAM. */
+/* Ordinary scrolling changes one hidden scenery column. Eight scattered bytes
+ * cost less than DMAing both complete 128-byte shore planes. */
+static void present_shore_columns(void) {
+    uint8_t col=shore_first,n=shore_count;
+    do {
+        VBK_REG=0;
+        ((volatile uint8_t *)0x98A0u)[col]=((volatile uint8_t *)0xCD60u)[col];
+        ((volatile uint8_t *)0x98C0u)[col]=((volatile uint8_t *)0xCD80u)[col];
+        ((volatile uint8_t *)0x98E0u)[col]=((volatile uint8_t *)0xCDA0u)[col];
+        ((volatile uint8_t *)0x9900u)[col]=((volatile uint8_t *)0xCDC0u)[col];
+        VBK_REG=1;
+        ((volatile uint8_t *)0x98A0u)[col]=((volatile uint8_t *)0xCF60u)[col];
+        ((volatile uint8_t *)0x98C0u)[col]=((volatile uint8_t *)0xCF80u)[col];
+        ((volatile uint8_t *)0x98E0u)[col]=((volatile uint8_t *)0xCFA0u)[col];
+        ((volatile uint8_t *)0x9900u)[col]=((volatile uint8_t *)0xCFC0u)[col];
+        col=(col+1)&31;
+    } while(--n);
+}
+
+/* Call at the start of VBlank (or with the LCD off). Transfer only changed bands:
+ * the budget includes DMA stalls, palette routines, bank switching and OAM.
+ * The default VBL OAM transfer is disabled; present commits it once per frame. */
 void render_present(void) {
     uint8_t scene_change=(uint8_t)(beach_loading || shop_loading || (actor_pending&4));
     uint8_t lcd_was_on=(uint8_t)(LCDC_REG&LCDCF_ON);
@@ -1164,24 +1210,28 @@ void render_present(void) {
     if(beach_pending) beach_present();
     if(actor_pending) actor_present();
     VBK_REG = 0;
-    GDMA(SHADOW_TILES + SHADOW_HUD, 0x9800, 4);
-    GDMA(SHADOW_TILES + SHADOW_WAVE, 0x9920, 2 * WAVE_ROWS);
-    GDMA(SHADOW_TILES + SHADOW_SHORE, 0x98A0, 8);
+    if(prepared_bands&DIRTY_HUD)GDMA(SHADOW_TILES + SHADOW_HUD, 0x9800, 4);
+    if(prepared_bands&DIRTY_WAVE)GDMA(SHADOW_TILES + SHADOW_WAVE, 0x9920, 2 * (WAVE_ROWS-2));
+    if(prepared_bands&DIRTY_FOOTER)GDMA(SHADOW_TILES + SHADOW_WAVE + 224, 0x9A00, 4);
+    if((prepared_bands&DIRTY_SHORE) && shore_count>=3)GDMA(SHADOW_TILES + SHADOW_SHORE, 0x98A0, 8);
     VBK_REG = 1;
-    GDMA(SHADOW_ATTRS + SHADOW_HUD, 0x9800, 4);
-    GDMA(SHADOW_ATTRS + SHADOW_WAVE, 0x9920, 2 * WAVE_ROWS);
-    GDMA(SHADOW_ATTRS + SHADOW_SHORE, 0x98A0, 8);
+    /* All top-HUD glyphs use bank 1 / palette 0; attributes were set at init. */
+    if(prepared_bands&DIRTY_WAVE)GDMA(SHADOW_ATTRS + SHADOW_WAVE, 0x9920, 2 * (WAVE_ROWS-2));
+    if(prepared_bands&DIRTY_FOOTER)GDMA(SHADOW_ATTRS + SHADOW_WAVE + 224, 0x9A00, 4);
+    if((prepared_bands&DIRTY_SHORE) && shore_count>=3)GDMA(SHADOW_ATTRS + SHADOW_SHORE, 0x98A0, 8);
+    if(shore_count && shore_count<3)present_shore_columns();
     scx_sky=raster_sky;
     scx_island=raster_island;
     scx_playfield=raster_playfield;
     scx_beach=raster_beach;
     VBK_REG = 0;
-    /* The page just prepared becomes the one GBDK's VBL handler DMAs every frame; copy it now
-     * too so sprites and map land in the same blank. The other page is free to build on.
+    /* Copy the prepared OAM page so sprites and map land in the same blank.
+     * The other page is free to build on.
      * GBDK's C-callable refresh_OAM() always copies from 0xC000, so call the HRAM routine,
      * which reads _shadow_OAM_base, directly. */
     _shadow_OAM_base = (uint8_t)((uint16_t)oam_back >> 8);
     __asm__("call .refresh_OAM");
+    DISABLE_OAM_DMA;
     oam_back = (uint8_t *)((uint16_t)oam_back == OAM_PAGE_A ? OAM_PAGE_B : OAM_PAGE_A);
     if(scene_change && lcd_was_on) {
         SCX_REG=0;LYC_REG=16;
@@ -1217,10 +1267,10 @@ static void sprite_pals(void) {
 }
 
 static void lcd_off(void) {
-    /* The LCD only turns off cleanly during mode 0 or 1. Clearing the bit at any other time
-     * leaves the screen running, and a raw VRAM copy then drops almost every write. */
+    /* Hardware requires LCD shutdown in VBlank. Initialisation may start with
+     * the boot screen active, so wait for mode 1 rather than a visible HBlank. */
     if (LCDC_REG & LCDCF_ON) {
-        while (STAT_REG & 0x03) ;
+        while (LY_REG < 144) ;
         LCDC_REG &= (uint8_t)~LCDCF_ON;
     }
 }
@@ -1296,4 +1346,7 @@ void render_init(void) {
     /* Tile patterns live at 0x8000, so index 0 is the first pattern, not the signed 0x8800 set. */
     LCDC_REG = LCDCF_BG8000 | LCDCF_BG9800 | LCDCF_OBJ16 | LCDCF_OBJON | LCDCF_BGON;
     shop_init();
+    VBK_REG=1;
+    memset((void *)0x9800u,0x08,64);
+    VBK_REG=0;
 }

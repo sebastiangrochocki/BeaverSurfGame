@@ -11,15 +11,17 @@ PNG2ASSET := $(GBDK)/bin/png2asset
 BUILD := build
 WEB := ../web
 
-# Game Boy Color only, MBC5 + 8 KB battery RAM, 1 RAM bank, 8 ROM banks, speed-optimised code.
-CART_FLAGS := -Wm-yC -Wm-yt0x1B -Wm-ya1 -Wm-yo8 -Wm-yn"BEAVERSURF"
+# Game Boy Color only, MBC5 + 8 KB battery RAM, 32 ROM banks (512 KB).
+# Banks 8-25 cache exact periodic wave refreshes instead of doing SM83 multiplies.
+CART_FLAGS := -Wm-yC -Wm-yt0x1B -Wm-ya1 -Wm-yo32 -Wm-yn"BEAVERSURF"
 CFLAGS := -Wf--opt-code-speed -Wf-Isrc -Wf-I$(BUILD)/gen -Wl-j $(CART_FLAGS)
 
 RULES := src/rules.c src/wave.c src/save.c src/shop.c src/surf.c src/race.c
-GAME := src/main.c src/render.c src/sprites.c src/sound.c src/beach.c src/actors.c src/shop_render.c
+GAME := src/main.c src/render.c src/sprites.c src/sound.c src/beach.c src/actors.c src/shop_render.c src/wave_lookup.c
 GEN := $(BUILD)/gen
 ASSETS := $(GEN)/bg.c $(GEN)/bg0.c $(GEN)/beaver.c $(GEN)/board.c $(GEN)/gull.c $(GEN)/ring.c $(GEN)/heart.c $(GEN)/splash.c $(GEN)/arrow.c $(GEN)/pop.c
-OBJECTS := $(addprefix $(BUILD)/obj/,$(patsubst %.c,%.o,$(RULES) $(GAME) $(ASSETS)))
+WAVE_ASSETS := $(addprefix $(GEN)/wave,$(addsuffix .c,8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25))
+OBJECTS := $(addprefix $(BUILD)/obj/,$(patsubst %.c,%.o,$(RULES) $(GAME) $(ASSETS) $(WAVE_ASSETS)))
 PNGFLAGS := -keep_palette_order -repair_indexed_pal -noflip -bpp 2 -sprite_no_optimize -b 3
 
 .PHONY: all probe clean
@@ -28,6 +30,12 @@ all: $(WEB)/beaver.gbc
 
 $(BUILD) $(GEN):
 	mkdir -p $(GEN)
+
+$(GEN)/wave8.c: ../tools/gen_wave_runtime.py src/wave.c src/wave_tables.h | $(GEN)
+	python3 ../tools/gen_wave_runtime.py
+
+$(filter-out $(GEN)/wave8.c,$(WAVE_ASSETS)): $(GEN)/wave8.c
+	@test -f $@
 
 $(GEN)/bg.c: res/bg.png | $(GEN)
 	$(PNG2ASSET) $< -o $@ -map -use_map_attributes -keep_duplicate_tiles -keep_palette_order -repair_indexed_pal -noflip -bpp 2 -max_palettes 8 -b 3
@@ -85,8 +93,8 @@ $(WEB)/beaver.gbc: $(BUILD)/beaver.gbc
 
 probe: $(BUILD)/probe.gbc
 
-$(BUILD)/probe.gbc: $(RULES) src/actors.c probe/main.c src/rules.h src/actors.h src/actor_data.h | $(BUILD)
-	$(LCC) $(CFLAGS) -o $@ $(RULES) src/actors.c probe/main.c
+$(BUILD)/probe.gbc: $(RULES) src/actors.c src/wave_lookup.c $(WAVE_ASSETS) probe/main.c src/rules.h src/actors.h src/actor_data.h | $(BUILD)
+	$(LCC) $(CFLAGS) -o $@ $(RULES) src/actors.c src/wave_lookup.c $(WAVE_ASSETS) probe/main.c
 
 clean:
 	rm -rf $(BUILD)

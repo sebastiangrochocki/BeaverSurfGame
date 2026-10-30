@@ -8,6 +8,7 @@ extern uint8_t beach_active;
 extern uint8_t beach_scx;
 extern uint8_t beach_pending;
 extern uint8_t beach_loading;
+extern uint8_t beach_map_dirty;
 void beach_refresh_palettes(void) BANKED;
 uint8_t beach_is_visible(void) BANKED;
 void beach_init(void) BANKED;

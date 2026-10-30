@@ -25,8 +25,12 @@ int main(void) {
         world_step(0,&events);
         assert(world.phase==PHASE_BEACH_END);
         assert(world.course_distance==expected && world.wave_scale==0);
-        for(ticks=0;ticks<160 && world.phase==PHASE_BEACH_END;ticks++)world_step(INPUT_RIGHT,&events);
-        assert(world.phase==PHASE_BEACH_START && world.course_distance==0);
+        for(ticks=0;ticks<BEACH_EXIT_X/FP;ticks++) {
+            assert(world.phase==PHASE_BEACH_END && world.stage==stage);
+            world_step(INPUT_RIGHT,&events);
+        }
+        assert(world.phase==PHASE_PLAY && world.course_distance==0);
+        assert(world.beaver.x==BEACH_CAMERA_X && !world.beach_pan && !world.wave_scale);
         assert(world.stage==(stage==255?255:stage+1));
     }
     assert(course_length==131000UL*FP);

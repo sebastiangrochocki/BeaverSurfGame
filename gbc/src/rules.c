@@ -75,13 +75,11 @@ uint8_t world_wave_tier(void) BANKED { return W.phase == PHASE_TITLE ? 0 : W.tie
 
 int16_t world_max_speed(void) BANKED { return (int16_t)(MAX_SPEED + (int16_t)W.combo * (VEL / 3)); }
 
-/* Advances tick and keeps tier equal to min(tick / 900, 8). */
+/* Stage difficulty stays stable across long crossings. A time ramp used to
+ * reach hard waves on stage 1, then reset to easier waves at stage 2. */
 static void advance_tick(void) {
     W.tick++;
-    if (++W.tier_ticks == 900) {
-        W.tier_ticks = 0;
-        if (W.tier < 8) W.tier++;
-    }
+    if (++W.tier_ticks == 900) W.tier_ticks = 0;
 }
 
 void world_new(void) BANKED {
@@ -99,6 +97,7 @@ void world_new(void) BANKED {
     W.ring_timer = ring_interval(0);
     W.rng = RNG_SEED;
     surf_reset();
+    race_challenges=0;
     race_reset();
     sea_build(0, 0);
     W.beaver.y = sea_at(world_beaver_x());
@@ -136,6 +135,19 @@ static void start_stage(uint8_t stage) {
     sea_build(W.tick, W.tier);
 }
 
+void world_next_stage_beach(void) BANKED {
+    start_stage(W.stage==255?255:(uint8_t)(W.stage+1));
+}
+
+static void enter_surf(uint8_t lane) {
+    W.phase=PHASE_PLAY;W.beach_timer=0;W.course_distance=0;
+    W.beaver.vx=W.beaver.vy=0;
+    W.beaver.lane=W.beaver.lane_to=lane;
+    W.beaver.y=lane_surface(world_beaver_x(),lane);
+    W.speed=(int16_t)(SCROLL_SPEED+(int16_t)(W.stage-1)*12);
+    race_begin_surf();
+}
+
 static void beach_step(uint8_t ending, uint8_t input) {
     W.tick++;
     W.beaver.vx=0;
@@ -166,19 +178,13 @@ static void beach_step(uint8_t ending, uint8_t input) {
     sea_refresh(W.tick, W.tier);
     if(shop_beach(input)) return;
     if (!ending && (uint16_t)W.beaver.x+W.beach_pan >= BEACH_WATER_X) {
-        W.phase = PHASE_PLAY;
-        W.beach_timer = 0;
-        W.course_distance = 0;
-        W.beaver.vx = 0;
-        W.beaver.vy = 0;
-        W.beaver.lane = W.beaver.y>=PX(126)?LANE_BOTTOM:LANE_TOP;
-        W.beaver.lane_to = W.beaver.lane;
-        W.beaver.y = lane_surface(world_beaver_x(),W.beaver.lane);
-        W.speed = (int16_t)(SCROLL_SPEED + (int16_t)(W.stage - 1) * 12);
-        race_begin_surf();
+        enter_surf(W.beaver.y>=PX(126)?LANE_BOTTOM:LANE_TOP);
     } else if (ending && W.beach_pan >= BEACH_EXIT_X) {
         uint8_t next = W.stage == 255 ? 255 : (uint8_t)(W.stage + 1);
+        uint8_t lane=W.beaver.y>=PX(126)?LANE_BOTTOM:LANE_TOP;
         start_stage(next);
+        W.beaver.x=BEACH_CAMERA_X;
+        enter_surf(lane);
     }
 }
 
@@ -257,10 +263,14 @@ static void ride(int16_t face, uint8_t input) {
 }
 
 /* Take-off height grows with surf speed, so speed from the last ramp carries into the next. */
-static void launch(int32_t world_x, uint8_t input) {
+static void launch(int32_t world_x, uint8_t input, int16_t face) {
     int16_t excess = (int16_t)(W.speed - SCROLL_SPEED);
     int16_t tug = (input & INPUT_RIGHT) ? RIGHT_TUG_VY : 0;
+    int16_t momentum = W.beaver.vx > 0 ? W.beaver.vx >> 2 : 0;
+    int16_t ramp = face < 0 ? (int16_t)(-face >> 1) : 0;
     Samples s;
+    if(ramp>VEL/2)ramp=VEL/2;
+    momentum+=ramp;
     if (excess < 0) excess = 0;
     if (W.beaver.lane == LANE_BOTTOM) {
         W.beaver.perfect = front_in_top_fifth(world_x);
@@ -274,15 +284,29 @@ static void launch(int32_t world_x, uint8_t input) {
     W.beaver.rings = 0;
     if (W.beaver.perfect) {
         /* excess is non-negative, so shifts truncate like the divisions. */
-        W.beaver.vy = (int16_t)(JUMP_VY - (int16_t)((int16_t)(excess * 3) >> 2) - tug);
+        W.beaver.vy = (int16_t)(JUMP_VY - (int16_t)((int16_t)(excess * 3) >> 2) - tug - momentum);
         W.speed = (int16_t)(W.speed + VEL / 2);
     } else {
-        W.beaver.vy = (int16_t)(EARLY_JUMP_VY - (int16_t)(excess >> 2) - (int16_t)(tug >> 1));
-        W.speed = div4((int16_t)(W.speed * 3));
+        W.beaver.vy = (int16_t)(EARLY_JUMP_VY - (int16_t)(excess >> 1) - (int16_t)(tug >> 1) - momentum);
     }
     if (W.beaver.vy < MAX_JUMP_VY) W.beaver.vy = MAX_JUMP_VY;
     W.beaver.airborne = 1;
     W.beaver.y = (int16_t)(W.beaver.y + (W.beaver.vy >> 2));
+}
+
+/* A directed lane transfer adds only the upward impulse needed to clear the
+ * current gap with 12px of room for the moving crest. No position snap or
+ * midair retrigger: ordinary gravity and upper-surface landing still apply. */
+static void climb_to_top(int16_t top) {
+    static const uint8_t velocity[16]={12,14,16,17,19,20,21,22,23,24,25,26,27,28,28,28};
+    int16_t gap=(int16_t)((W.beaver.y-top)>>6),needed;
+    uint8_t index;
+    if(gap<0)gap=0;
+    index=(uint8_t)((gap+19)>>3);
+    if(index>15)index=15;
+    needed=-(int16_t)((uint16_t)velocity[index]<<6);
+    if(W.beaver.vy>needed)W.beaver.vy=needed;
+    W.beaver.lane_to=LANE_TOP;W.beaver.cleared=0;
 }
 
 static void splash_at(uint8_t big) {
@@ -509,18 +533,19 @@ static uint8_t touching_heart(uint8_t input) {
 }
 
 static void rider_step(uint8_t input,Events *events) {
-    uint8_t jump_edge,dive_edge,down_edge,up_edge,stunned;
-    uint8_t jump=(input&INPUT_JUMP)!=0,dive=(input&INPUT_DIVE)!=0;
-    Samples s;
-    int16_t surface=0,face=0,top;
-    int32_t world_x;
-    uint8_t lane;
+    /* Both riders run sequentially; none of this scratch state survives a call.
+     * Absolute WRAM avoids SDCC spilling every sample/edge to a large stack frame. */
+    static uint8_t jump_edge,dive_edge,down_edge,stunned,jump,dive,lane;
+    static Samples s;
+    static int16_t surface,face,top;
+    static int32_t world_x;
+    jump=(input&INPUT_JUMP)!=0;dive=(input&INPUT_DIVE)!=0;
+    surface=face=0;
     jump_edge = jump && !W.jump_held;
     W.jump_held = jump;
     dive_edge = (uint8_t)(dive && !W.dive_held);
     W.dive_held = dive;
     down_edge=(uint8_t)((input&INPUT_DOWN) && !surf_down_held);
-    up_edge=(uint8_t)((input&INPUT_UP) && !surf_up_held);
     surf_down_held=(uint8_t)(input&INPUT_DOWN);
     surf_up_held=(uint8_t)(input&INPUT_UP);
     if(jump_edge && !W.beaver.airborne)surf_jump_buffer=6;
@@ -560,16 +585,17 @@ static void rider_step(uint8_t input,Events *events) {
     }
 
     if (W.beaver.airborne) {
-        uint8_t climbing, dropping;
-        int16_t bottom;
+        static uint8_t climbing, dropping;
+        static int16_t bottom;
         top = lane==LANE_TOP?surface:sea_at(world_x);
         if (down_edge && W.beaver.lane_to == LANE_TOP) {
                 W.beaver.lane_to=LANE_BOTTOM;
-        } else if (up_edge && W.beaver.lane == LANE_BOTTOM && W.beaver.vy<0 && !W.beaver.flip) {
-                W.beaver.lane_to = LANE_TOP;
-                W.beaver.cleared = 0;
+        } else if ((input&INPUT_UP) && W.beaver.lane == LANE_BOTTOM && W.beaver.lane_to==LANE_BOTTOM && W.beaver.vy<0 && !W.beaver.flip) {
+                climb_to_top(top);
         } else if (jump_edge && !(input&(INPUT_UP|INPUT_DOWN)) && W.beaver.flip == 0 && W.beaver.lane == W.beaver.lane_to) {
-            if(surf_flip_safe())W.beaver.flip = FLIP_FRAMES;
+            /* The player chooses the risk, including on low/early jumps.
+             * Only the NPC uses the forecast to plan conservative attempts. */
+            if(!rival_stepping || surf_flip_safe())W.beaver.flip = FLIP_FRAMES;
             else show(BANNER_LOW,0,0,0);
         }
         if (W.beaver.flip > 0) {
@@ -597,11 +623,11 @@ static void rider_step(uint8_t input,Events *events) {
             land(lane_slope(world_x,lane), events, 0);
         }
     } else {
-        uint8_t allowed;
-        int8_t meter;
+        static uint8_t allowed;
+        static int8_t meter;
         if (lane == LANE_BOTTOM) {
-            FrontRide ride;
-            if(rival_stepping)front_motion(world_x,&ride);
+            static FrontRide ride;
+            if(rival_stepping || RACING)front_motion(world_x,&ride);
             else front_ride(world_x, &ride);
             surface = ride.surface;
             face = ride.slope;
@@ -609,15 +635,16 @@ static void rider_step(uint8_t input,Events *events) {
             meter = ride.meter;
         } else {
             allowed = sea_jump_allowed_s(&s);
-            meter = rival_stepping?0:sea_jump_meter_s(&s);
+            meter = (rival_stepping || RACING)?0:sea_jump_meter_s(&s);
         }
         W.beaver.y = surface;
         W.beaver.vy = 0;
         ride(face, input);
-        if(!rival_stepping)glide_meter(meter);
+        if(!rival_stepping && !RACING)glide_meter(meter);
         if ((jump || surf_jump_buffer) && !stunned && allowed) {
-            launch(world_x, input);
+            launch(world_x, input, face);
             if(lane==LANE_TOP && (input&INPUT_DOWN))W.beaver.lane_to=LANE_BOTTOM;
+            else if(lane==LANE_BOTTOM && (input&INPUT_UP))climb_to_top(sea_at(world_x));
             surf_jump_buffer=0;
             events->jumped = 1;
         }
@@ -629,6 +656,125 @@ static void rider_step(uint8_t input,Events *events) {
 
 /* Exchange only compact rider state, never World, the course or its clock.
  * Both racers execute exactly the same movement/landing/flip code above. */
+#ifdef __SDCC
+#include <stddef.h>
+#define WX_beaver 10
+typedef char er_world_beaver[(offsetof(World,beaver)==WX_beaver)?1:-1];
+#define RX_beaver 0
+typedef char er_rider_beaver[(offsetof(RiderState,beaver)==RX_beaver)?1:-1];
+#define WX_score 101
+typedef char er_world_score[(offsetof(World,score)==WX_score)?1:-1];
+#define RX_score 18
+typedef char er_rider_score[(offsetof(RiderState,score)==RX_score)?1:-1];
+#define WX_speed 8
+typedef char er_world_speed[(offsetof(World,speed)==WX_speed)?1:-1];
+#define RX_speed 22
+typedef char er_rider_speed[(offsetof(RiderState,speed)==RX_speed)?1:-1];
+#define WX_combo_timer 90
+typedef char er_world_combo_timer[(offsetof(World,combo_timer)==WX_combo_timer)?1:-1];
+#define RX_combo_timer 24
+typedef char er_rider_combo_timer[(offsetof(RiderState,combo_timer)==RX_combo_timer)?1:-1];
+#define WX_banner_points 95
+typedef char er_world_banner_points[(offsetof(World,banner_points)==WX_banner_points)?1:-1];
+#define RX_banner_points 26
+typedef char er_rider_banner_points[(offsetof(RiderState,banner_points)==RX_banner_points)?1:-1];
+#define WX_combo 89
+typedef char er_world_combo[(offsetof(World,combo)==WX_combo)?1:-1];
+#define RX_combo 28
+typedef char er_rider_combo[(offsetof(RiderState,combo)==RX_combo)?1:-1];
+#define WX_meter 92
+typedef char er_world_meter[(offsetof(World,meter)==WX_meter)?1:-1];
+#define RX_meter 29
+typedef char er_rider_meter[(offsetof(RiderState,meter)==RX_meter)?1:-1];
+#define WX_invuln 110
+typedef char er_world_invuln[(offsetof(World,invuln)==WX_invuln)?1:-1];
+#define RX_invuln 31
+typedef char er_rider_invuln[(offsetof(RiderState,invuln)==RX_invuln)?1:-1];
+#define WX_banner 94
+typedef char er_world_banner[(offsetof(World,banner)==WX_banner)?1:-1];
+#define RX_banner 32
+typedef char er_rider_banner[(offsetof(RiderState,banner)==RX_banner)?1:-1];
+#define WX_banner_mult 97
+typedef char er_world_banner_mult[(offsetof(World,banner_mult)==WX_banner_mult)?1:-1];
+#define RX_banner_mult 33
+typedef char er_rider_banner_mult[(offsetof(RiderState,banner_mult)==RX_banner_mult)?1:-1];
+#define WX_jump_held 246
+typedef char er_world_jump_held[(offsetof(World,jump_held)==WX_jump_held)?1:-1];
+#define RX_jump_held 36
+typedef char er_rider_jump_held[(offsetof(RiderState,jump_held)==RX_jump_held)?1:-1];
+typedef char er_buffer_ok[(offsetof(RiderState,buffer)==40 && offsetof(RiderState,up)==41 && offsetof(RiderState,down)==42)?1:-1];
+static void exchange_rider(void) __naked {
+    __asm
+        ld hl, #(_world + WX_beaver)
+        ld de, #(_race + RX_beaver)
+        ld b, #18
+        call er_bytes
+        ld hl, #(_world + WX_score)
+        ld de, #(_race + RX_score)
+        ld b, #4
+        call er_bytes
+        ld hl, #(_world + WX_speed)
+        ld de, #(_race + RX_speed)
+        ld b, #2
+        call er_bytes
+        ld hl, #(_world + WX_combo_timer)
+        ld de, #(_race + RX_combo_timer)
+        ld b, #2
+        call er_bytes
+        ld hl, #(_world + WX_banner_points)
+        ld de, #(_race + RX_banner_points)
+        ld b, #2
+        call er_bytes
+        ld hl, #(_world + WX_combo)
+        ld de, #(_race + RX_combo)
+        ld b, #1
+        call er_bytes
+        ld hl, #(_world + WX_meter)
+        ld de, #(_race + RX_meter)
+        ld b, #2
+        call er_bytes
+        ld hl, #(_world + WX_invuln)
+        ld de, #(_race + RX_invuln)
+        ld b, #1
+        call er_bytes
+        ld hl, #(_world + WX_banner)
+        ld de, #(_race + RX_banner)
+        ld b, #1
+        call er_bytes
+        ld hl, #(_world + WX_banner_mult)
+        ld de, #(_race + RX_banner_mult)
+        ld b, #3
+        call er_bytes
+        ld hl, #(_world + WX_jump_held)
+        ld de, #(_race + RX_jump_held)
+        ld b, #4
+        call er_bytes
+        ld hl, #_surf_jump_buffer
+        ld de, #(_race + 40)
+        ld b, #1
+        call er_bytes
+        ld hl, #_surf_up_held
+        ld de, #(_race + 41)
+        ld b, #1
+        call er_bytes
+        ld hl, #_surf_down_held
+        ld de, #(_race + 42)
+        ld b, #1
+        call er_bytes
+        ret
+er_bytes:
+        ld a, (de)
+        ld c, (hl)
+        ld (hl+), a
+        ld a, c
+        ld (de), a
+        inc de
+        dec b
+        jr NZ, er_bytes
+        ret
+    __endasm;
+}
+#else
 static void exchange_rider(void) {
     Beaver b=W.beaver;
     uint32_t score=W.score;
@@ -650,6 +796,7 @@ static void exchange_rider(void) {
     v=surf_up_held;surf_up_held=r->up;r->up=v;
     v=surf_down_held;surf_down_held=r->down;r->down=v;
 }
+#endif
 static void check_hit(uint8_t input,Events *events) {
     if(W.invuln)W.invuln--;
     else if(W.phase==PHASE_PLAY && touching_gull(input)) {

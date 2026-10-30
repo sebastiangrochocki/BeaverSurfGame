@@ -7,6 +7,7 @@
 #include "rules.h"
 #include "sound.h"
 #include "shop.h"
+#include "race.h"
 
 /* Raster bands: HUD lines 0-15 stay put, sky (16-39) and shore (40-71) scroll.
  * Beach terrain begins at 48; the surf wave uses its own unscrolled map from 72. */
@@ -20,9 +21,8 @@ volatile uint8_t scx_beach;
 static volatile uint8_t pending;
 /* A prepared frame sits in the shadow maps waiting for the vblank handler to copy it in. */
 static volatile uint8_t frame_ready;
-/* Two independent riders can push a rare frame preparation just past three
- * VBlanks. Retain all four owed ticks, then drain them before drawing again;
- * this changes queue capacity, never the 60 Hz physics or shared race clock. */
+/* Retain four owed ticks during render bursts. The loop shares CPU time between
+ * drawing and simulation instead of allowing the backlog to starve drawing. */
 #define MAX_PENDING 4
 /* Buttons passed to the last rules step; the renderer picks the tuck pose from it. */
 uint8_t last_input;
@@ -42,6 +42,8 @@ static void vbl_tick(void) {
      * normal addressing, objects and gameplay palettes before the next top row,
      * including vblanks where no new render was prepared. */
     LCDC_REG |= LCDCF_BG8000 | LCDCF_OBJON;
+    SCX_REG=0;
+    LYC_REG=16;
     if(hud_icons)render_hud_palettes(0);
     if (frame_ready) {
         render_present();
@@ -158,6 +160,7 @@ static void step_once(Events *events) {
 
 void main(void) {
     Events events;
+    uint8_t steps;
     cpu_fast();
     cgb_compatibility();
     sound_init();
@@ -177,19 +180,19 @@ void main(void) {
     DISPLAY_ON;
     pending = 0;
 
-    /* The rules keep 60 Hz and the display takes whatever is left: the CPU never idles while
-     * a tick is owed. A frame is prepared from the current state, then while it waits for its
-     * vblank the ticks that arrive are stepped straight away, so a frame that takes a little
-     * over two vblanks only costs display rate, never game time. Top lane: about 28 fps;
-     * bottom lane, whose steps are heavier: about 20 fps. */
+    /* Race drawing gets a turn after two simulation ticks once the debt is
+     * down to one tick. Leave room for ticks arriving during preparation;
+     * forcing a render with a deeper debt overflows the four-tick queue.
+     * Solo retains full catch-up; the lower display meter is cached. */
     while (1) {
         while (frame_ready) {
             if (pending) step_once(&events);
             else __asm__("halt\n nop");
         }
         while (pending == 0) __asm__("halt\n nop");
+        steps=0;
         do step_once(&events);
-        while (pending);
+        while (pending && (!RACING || ++steps<2 || pending>1));
         render_prepare();
         frame_ready = 1;
     }

@@ -2,6 +2,19 @@
 #include <stdio.h>
 #include "../src/race.h"
 #include "../src/surf.h"
+static void accuracy_budget(uint8_t precision) {
+    unsigned i,precise=0;
+    world_new();world.phase=PHASE_PLAY;race.state=RACE_ACTIVE;
+    race.precision=precision;race.ai_accuracy=0;race.ai_seen=race.sequence;
+    race.rival.beaver=world.beaver;
+    pickups[0].x=PX(200);pickups[0].y=HORIZON;pickups[0].flags=PICKUP_PRESENT;
+    for(i=0;i<TABLE_LEN;i++)world.heights[i]=HORIZON;
+    for(i=0;i<100;i++) {
+        race.ai_wait=race.ai_think=0;
+        if(race_ai()&INPUT_RIGHT)precise++;
+    }
+    assert(precise==precision);
+}
 static uint32_t duel(uint8_t policy,uint8_t stage,uint32_t *npc) {
     Events e;unsigned tick;uint8_t i,input=0;
     world_new();world.phase=PHASE_PLAY;world.stage=stage;
@@ -38,10 +51,11 @@ static uint32_t duel(uint8_t policy,uint8_t stage,uint32_t *npc) {
 }
 int main(void) {
     uint32_t npc,score,repeat,npc_repeat;uint8_t policy,stage,wins=0;
+    accuracy_budget(80);accuracy_budget(90);accuracy_budget(100);
     for(stage=2;stage<=4;stage++)for(policy=0;policy<3;policy++) {
         score=duel(policy,stage,&npc);repeat=duel(policy,stage,&npc_repeat);
         assert(score==repeat && npc==npc_repeat);
         if(policy && score>npc)wins++;
     }
-    assert(wins);puts("AI is deterministic, earns real events and can be beaten without handicaps");
+    assert(wins);puts("AI: exact 80/90/100% precise decision budgets, deterministic real scoring, beatable without point handicaps");
 }

@@ -71,7 +71,7 @@
     </nav>
     <div id="game"></div>
     <p id="hint-gba">Arrows steer. Z or Space jumps; press again in the air to backflip, or from the near wave to jump lanes. Double-tap Down to drop to the near wave. Clear the top wave on the way up or wipe out. Down dives. Land on the downhill side to boost. Enter starts, and pauses during play.</p>
-    <p id="hint-gbc">Enter starts. On the beach, arrows walk; Z (A) enters the shop near its door. Walk right to its keeper and press Z to talk. Left/Right chooses a board, Z buys or equips, X (B) closes the menu. Walk left to exit. From stage 2, approach the teal-board rival and press Z for a score race: entry 1000, win payout 2000, draw refund 1000. Left selects Yes, Right selects No, Z confirms, X cancels. Most points wins, not arrival order; Z advances the results. Walk into the water to surf; at the far beach, walk right to continue. Surfing: Left/Right steers; Z or Space jumps (hold to repeat). Press A again while airborne to flip when there is enough clearance. Jump first, then press Up or Down to change lanes; A+Down also jumps toward the lower lane. Down or X alone holds the tuck on your current lane, or fast-falls in the air. Touch gold rings with your body or board for 25 points; gull hits lose 50 points. Ring groups grow to four and bob vertically in harder stages. Enter pauses surfing.</p>
+    <p id="hint-gbc">Enter starts. On the beach, arrows walk; Z (A) enters the shop near its door. Walk right to its keeper and press Z to talk. Left/Right chooses a board, Z buys or equips, X (B) closes the menu. Walk left to exit. On finish beaches (and start beaches from stage 2), approach the teal-board rival and press Z for a score race: entry 1000, win payout 2000, draw refund 1000. Left selects Yes, Right selects No, Z confirms, X cancels. Most points wins, not arrival order; Z advances the results. Rival aim starts at 80%, rises to 90% for your next paid challenge, then caps at 100% for the rest of the run. Walk into the water to surf; at the far beach, pass the house, palm and numbered next-stage flag, then cross the short 64-pixel sand stretch into the water to continue. Surfing: Left/Right steers; Z or Space jumps (hold to repeat). Press Z or Space again while airborne to flip at any jump-bar position. Finish the rotation before landing. Jump then hold Up to return to the upper lane, or press A+Up together. Jump then Down (or A+Down) drops to the lower lane. Speed, rightward momentum and rising ramps add jump height; early jumps keep your speed. Waves grow through stage 9. Down or X alone holds the tuck on your current lane, or fast-falls in the air. Touch gold rings with your body or board for 25 points; gull hits lose 50 points. Ring groups grow to four and bob vertically in harder stages. Enter pauses surfing.</p>
   </main>
   <script>
     const asked = new URLSearchParams(location.search).get("sys");
@@ -87,7 +87,7 @@
     EJS_color = "#1a5276";
     EJS_startOnLoaded = true;
     EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
-    EJS_gameUrl = sys === "gbc" ? "beaver.gbc?v=64" : "beaver.gba?v=29";
+    EJS_gameUrl = sys === "gbc" ? "beaver.gbc?v=69" : "beaver.gba?v=29";
     EJS_threads = false;
     // EmulatorJS only flushes cartridge SRAM to IndexedDB every 5 minutes or on unload,
     // and the unload path aborts the core before the write settles. Flush often instead.

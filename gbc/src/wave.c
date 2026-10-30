@@ -1,10 +1,11 @@
-/* Integer wave sampled into a 64-entry table, a quarter of it per frame. Mirrors sim/src/wave.rs.
+/* Integer main wave sampled into a 64-entry table, a quarter of it per frame.
+ * Main-wave samples mirror sim/src/wave.rs; the GBC lower-lane shaping differs.
  *
  * The Game Boy has no multiplier or divider, so this file reshapes the arithmetic without
  * changing a single result: envelope values and meter positions come from generated ROM tables,
- * angles are byte additions, the amplitude scale is applied as base + ((base * delta) >> 8) with
- * 8-bit factors by quarter squares, and the 0..7 interpolation weight is applied by shift-and-add.
- * The golden traces prove the results identical to the Rust rules.
+ * angles are byte additions, amplitude uses 8-bit factors by quarter squares,
+ * and 0..7 interpolation weights use shift-and-add. The main-wave ROM cache is
+ * checked against every sample of this reference calculation.
  *
  * On the Game Boy this file lives in ROM bank 2. The callers are banked, so the lookup tables
  * stay visible for the whole call and the fixed bank is free for the rest of the game. */
@@ -13,6 +14,9 @@
 #endif
 #include "rules.h"
 #include "wave_tables.h"
+#ifdef __SDCC
+void wave_lookup(uint16_t tick,uint8_t tier) __nonbanked;
+#endif
 
 static const int8_t SIN8[256] = {
     0,    3,    6,    9,    12,   16,   19,   22,   25,   28,   31,   34,   37,   40,   43,
@@ -62,12 +66,15 @@ uint8_t wave_tier(uint32_t tick) BANKED {
     return t > 8 ? 8 : (uint8_t)t;
 }
 
-uint8_t front_num = 5;
+uint8_t front_num = 12;
+static int8_t front_meter_target;
+static uint8_t front_meter_tick,front_meter_valid;
 
-/* 5 + min(tier, 6) / 2 */
+/* Higher crests every stage through the inherited sea amplitude. Shallow
+ * troughs keep the lower rider above the footer; crests retain their full lift. */
 static uint8_t front_scale(uint8_t tier) {
-    if (tier > 6) tier = 6;
-    return (uint8_t)(5 + (tier >> 1));
+    if (tier > 8) tier = 8;
+    return (uint8_t)(12 + (tier >> 1));
 }
 
 /* a * b for a >= 0: one absolute value and the sign of b decide everything. */
@@ -321,13 +328,25 @@ static void prepare(uint32_t tick, uint8_t tier) {
 
 void sea_build(uint32_t tick, uint8_t tier) BANKED {
     uint8_t quarter;
+    front_meter_valid=0;
     prepare(tick, tier);
     for (quarter = 0; quarter < 4; quarter++) refresh_quarter(quarter);
 }
 
 void sea_refresh(uint32_t tick, uint8_t tier) BANKED {
+#ifdef __SDCC
+    uint8_t n=16,scale=world.wave_scale;
+    int16_t *dest=world.heights+((uint8_t)tick&3);
+    front_num=front_scale(tier);
+    if(scale)wave_lookup((uint16_t)tick,tier);
+    if(scale<16)do {
+        *dest=scale?(int16_t)(HORIZON+((*dest-HORIZON)>>4)*scale):HORIZON;
+        dest+=4;
+    } while(--n);
+#else
     prepare(tick, tier);
     refresh_quarter((uint8_t)tick & 3);
+#endif
 }
 
 int16_t steer_scale(int16_t slope) BANKED {
@@ -476,9 +495,10 @@ wk_cont:
 /* 112*64 and 140*64. The walker bakes these in; the typedef fails the build if they move. */
 typedef char fa_horizon_ok[(HORIZON == 7168 && FRONT_HORIZON == 8960) ? 1 : -1];
 
-/* Height of the bottom lane at sea-pixel fa_at, in HL. Same truncation as front_at_px:
- * delta * 5 by shift-add, then one more delta per sixteenth front_num has over 5. */
-static void fa_height(void) __naked {
+/* Lower crests keep full height, troughs use a quarter of the swing. Reduce
+ * precision by two fractional bits before multiplying to avoid signed overflow.
+ * front_num is 12..16: multiply by 12, add at most four copies. */
+static void fa_raw_height(void) __naked {
     __asm
         ld hl, #_fa_at
         ld a, (hl+)
@@ -499,6 +519,12 @@ static void fa_height(void) __naked {
         ld a, l
         ld (#_le_index), a
         call le_core
+        ret
+    __endasm;
+}
+
+static void fa_scale_height(void) __naked {
+    __asm
         ld de, #0x1c00
         ld a, l
         sub a, e
@@ -506,13 +532,25 @@ static void fa_height(void) __naked {
         ld a, h
         sbc a, d
         ld h, a
+        bit 7, h
+        jr NZ, fa_crest
+        sra h
+        rr l
+        sra h
+        rr l
+fa_crest:
+        sra h
+        rr l
+        sra h
+        rr l
         ld d, h
         ld e, l
         add hl, hl
-        add hl, hl
         add hl, de
+        add hl, hl
+        add hl, hl
         ld a, (#_front_num)
-        sub a, #5
+        sub a, #12
         jr Z, fa_scaled
 fa_more:
         add hl, de
@@ -523,12 +561,56 @@ fa_scaled:
         rr l
         sra h
         rr l
-        sra h
-        rr l
-        sra h
-        rr l
+        ; Limit the very deepest troughs to y150 (feet remain above the HUD).
+        bit 7, h
+        jr NZ, fa_add
+        ld a, h
+        cp a, #2
+        jr C, fa_add
+        jr NZ, fa_limit
+        ld a, l
+        cp a, #129
+        jr C, fa_add
+fa_limit:
+        ld hl, #640
+fa_add:
         ld de, #0x2300
         add hl, de
+        ret
+    __endasm;
+}
+
+static void fa_height(void) __naked {
+    __asm
+        call _fa_raw_height
+        jp _fa_scale_height
+    __endasm;
+}
+
+/* Crest searches compare raw table samples: shaping is monotone, so only the
+ * final crest/trough needs scaling instead of every entry in both walks. */
+static void fa_raw_sample(void) __naked {
+    __asm
+        call _fa_raw_height
+        ld a, l
+        ld (#_fa_prev), a
+        ld a, h
+        ld (#_fa_prev + 1), a
+        ret
+    __endasm;
+}
+
+static void fa_scaled_sample(void) __naked {
+    __asm
+        ld a, (#_fa_prev)
+        ld l, a
+        ld a, (#_fa_prev + 1)
+        ld h, a
+        call _fa_scale_height
+        ld a, l
+        ld (#_fa_prev), a
+        ld a, h
+        ld (#_fa_prev + 1), a
         ret
     __endasm;
 }
@@ -568,7 +650,7 @@ fa_loop:
         ld (#_fa_at), a
         ld a, h
         ld (#_fa_at + 1), a
-        call _fa_height
+        call _fa_raw_height
         ld a, (#_fa_prev)
         ld e, a
         ld a, (#_fa_prev + 1)
@@ -744,7 +826,7 @@ int8_t sea_jump_meter_s(const Samples *s) BANKED {
     }
 }
 
-/* Bottom lane: the height table, twice as long and front_num/16 as tall. The scale is a
+/* Bottom lane: the height table, twice as long, with stronger crests and shallow troughs. The scale is a
  * shift-add in fa_height so the jump-meter walk stays in this bank; a banked sea_at_px plus a
  * 32-bit multiply per sample pushed one grounded frame past the two-vblank budget. */
 static int16_t front_at_px(int32_t world_px) {
@@ -757,7 +839,10 @@ static int16_t front_at_px(int32_t world_px) {
     int16_t sample = (int16_t)((world_px >> 1) + FRONT_PHASE);
     uint16_t phase = (uint16_t)(sample & 511);
     int16_t delta = (int16_t)(lerp_entry((uint8_t)(phase >> 3), (uint8_t)(phase & 7)) - HORIZON);
-    return (int16_t)(FRONT_HORIZON + (int16_t)((int16_t)(delta * front_num) >> 4));
+    if(delta>0)delta>>=2;
+    delta=(int16_t)(((delta>>2)*front_num)>>2);
+    if(delta>PX(10))delta=PX(10);
+    return (int16_t)(FRONT_HORIZON+delta);
 #endif
 }
 
@@ -792,27 +877,33 @@ int16_t front_slope(int32_t world_x) BANKED {
 
 /* `here` is the lane height at world_x, which the caller has sampled already. */
 static int16_t front_walk(int32_t world_x, int16_t here, int8_t dir, uint8_t seek_crest) {
+    (void)here;
 #ifdef __SDCC
     int16_t px = (int16_t)(world_x >> 6);
     fa_at = (uint16_t)((px >> 1) + FRONT_PHASE);
-    fa_prev = here;
+    fa_raw_sample();
     fa_dir = (int8_t)(dir * 4);
     fa_seek = seek_crest;
     fa_walk();
+    fa_scaled_sample();
     return fa_prev;
 #else
-    int32_t at = world_x >> 6;
-    int16_t prev = here;
-    int16_t step_px = (int16_t)(dir * 8);
+    int16_t at = (int16_t)((world_x >> 7) + FRONT_PHASE);
+    int16_t prev = sea_at_px(at);
+    int16_t step_px = (int16_t)(dir * 4);
     uint8_t step;
     for (step = 0; step < 20; step++) {
         int16_t next;
         at += step_px;
-        next = front_at_px(at);
+        next = sea_at_px(at);
         if (seek_crest ? next >= prev : next <= prev) break;
         prev = next;
     }
-    return prev;
+    prev-=HORIZON;
+    if(prev>0)prev>>=2;
+    prev=(int16_t)(((prev>>2)*front_num)>>2);
+    if(prev>PX(10))prev=PX(10);
+    return (int16_t)(FRONT_HORIZON+prev);
 #endif
 }
 
@@ -870,7 +961,14 @@ void front_ride(int32_t world_x, FrontRide *out) BANKED {
     out->surface = s.here;
     out->slope = slope_of(&s);
     out->allowed = (uint8_t)(!trough_of(&s) && (crest_of(&s) || slope_of(&s) < 0));
-    out->meter = front_meter_of(world_x, &s);
+    /* The visible meter already glides toward its target. Refresh that costly
+     * crest/trough search at 15Hz; contact, slope, permission and actual launch
+     * timing remain exact at 60Hz. The NPC never pays for a display meter. */
+    if(!front_meter_valid || (uint8_t)((uint8_t)world.tick-front_meter_tick)>=4) {
+        front_meter_target=front_meter_of(world_x,&s);
+        front_meter_tick=(uint8_t)world.tick;front_meter_valid=1;
+    }
+    out->meter=front_meter_target;
 }
 /* Identical physical samples/permission without the player's display-only meter walk. */
 void front_motion(int32_t world_x,FrontRide *out) BANKED {

@@ -44,7 +44,7 @@
 #define GRAVITY 51
 #define DIVE_GRAVITY 154
 #define JUMP_VY (-(VEL * 4))
-#define EARLY_JUMP_VY (-(VEL * 2))
+#define EARLY_JUMP_VY (-(VEL * 3))
 #define RIGHT_TUG_VY (3 * VEL / 4)
 #define MAX_JUMP_VY (-(VEL * 7))
 #define DOUBLE_TAP 12
@@ -79,7 +79,13 @@
 #define BEACH_START_X (48 * FP)
 #define BEACH_CAMERA_X (96 * FP)
 #define BEACH_WATER_X (192 * FP)
-#define BEACH_EXIT_X (120 * FP)
+/* Native 8px map columns: house ends at x160, then 64 pixels of sand,
+ * a 16px outgoing shoreline, and water. Camera pan stays in uint16_t. */
+#define BEACH_EXTRA_COLUMNS 8u
+#define BEACH_END_HOUSE_NATIVE 80u
+#define BEACH_END_RIGHT_NATIVE (BEACH_END_HOUSE_NATIVE + 80u + BEACH_EXTRA_COLUMNS * 8u)
+#define BEACH_END_SHORE_COLUMNS ((BEACH_END_RIGHT_NATIVE - 48u) / 8u)
+#define BEACH_EXIT_X ((((BEACH_END_RIGHT_NATIVE + 16u) * 3u / 2u) - 96u) * FP)
 #define INVULN_FRAMES 45
 #define RING_POINTS 25
 #define GULL_AIR_SPEED FP
@@ -200,7 +206,7 @@ typedef struct {
     uint8_t up_tap;
     uint8_t ring_lane[RING_SLOTS];
     uint8_t heart_lane;
-    /* Difficulty tier (tick / 900, at most 8) kept incrementally to avoid a 32-bit divide. */
+    /* Stage difficulty, min(stage - 1, 8); tier_ticks retains its packed offset. */
     uint8_t tier;
     uint16_t tier_ticks;
     /* Course progress is separate from world scroll so each stage has a fixed distance. */
@@ -239,6 +245,7 @@ extern uint32_t course_length;
 /* rules.c */
 void world_new(void) BANKED;
 void world_step(uint8_t input, Events *events) BANKED;
+void world_next_stage_beach(void) BANKED;
 int32_t world_beaver_x(void) BANKED;
 uint8_t world_wave_tier(void) BANKED;
 int16_t world_max_speed(void) BANKED;
@@ -254,7 +261,7 @@ typedef struct {
 } Samples;
 
 uint8_t wave_tier(uint32_t tick) BANKED;
-/* Bottom-lane height in sixteenths of the top wave's swing (beaver_sim front_scale), set by
+/* Bottom-lane crest height in sixteenths of the top wave's swing, set by
  * sea_build / sea_refresh for the tier they were given. The renderer reads it too. */
 extern uint8_t front_num;
 void sea_build(uint32_t tick, uint8_t tier) BANKED;

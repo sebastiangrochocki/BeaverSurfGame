@@ -44,7 +44,9 @@ int main(void) {
     step(INPUT_RIGHT,84);assert(shop_near_door());
     tap(INPUT_ACTION);assert(world.phase==PHASE_SHOP);
     step(INPUT_LEFT,20);assert(world.phase==PHASE_BEACH_END);
-    step(INPUT_RIGHT,50);assert(world.phase==PHASE_BEACH_START && world.stage==2);
+    step(INPUT_RIGHT,50);assert(world.phase==PHASE_BEACH_END && world.stage==1);
+    step(INPUT_RIGHT,(unsigned)(BEACH_EXIT_X/FP-world.beach_pan/FP));
+    assert(world.phase==PHASE_PLAY && world.stage==2);
     assert(course_length==4500UL*FP);
     assert(shop_equipped==1 && shop_owned==3);
     puts("Shop rules: 2D bounds, A-only doors, counter range, exact price, insufficient funds, no repeat charge, equip, corrupt-save rejection, both beaches and stage continuity pass");

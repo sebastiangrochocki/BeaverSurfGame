@@ -20,9 +20,13 @@ typedef struct {
     uint16_t timer,payout;
     uint8_t state,held,yes,short_funds,saved_health,page;
     uint8_t ai_input,ai_wait,ai_think,ai_seen,ai_flip,sequence;
+    uint8_t precision,ai_accuracy;
 } RaceState;
 extern RaceState race;
+/* Accepted challenges in this run; survives beach changes, resets with world_new. */
+extern uint8_t race_challenges;
 #define RIVAL_BEACH_X 144
+#define RIVAL_FINISH_X 312
 #define RIVAL_BEACH_Y 136
 #define RACING (race.state==RACE_ACTIVE)
 void race_reset(void) BANKED;

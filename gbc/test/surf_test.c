@@ -4,14 +4,35 @@
 #include "../src/rules.h"
 #include "../src/surf.h"
 #include "../src/actors.h"
+#include "../src/race.h"
 static Events e;
 static void play(void) {
     world_new();world.phase=PHASE_PLAY;world.course_distance=500UL*FP;
     world.gull_timer=world.ring_timer=60000;world.tick=1;
     world.beaver.x=PX(96);world.beaver.y=sea_at(world_beaver_x());
 }
+static void low_flip(uint8_t lane,uint8_t racing,int8_t meter) {
+    play();
+    if(racing) {
+        race.state=RACE_ACTIVE;
+        race.rival.beaver=world.beaver;
+        race.rival.beaver.lane=race.rival.beaver.lane_to=LANE_BOTTOM;
+        race.rival.speed=SCROLL_SPEED;
+    }
+    world.beaver.lane=world.beaver.lane_to=lane;
+    world.beaver.airborne=1;
+    world.beaver.y=lane_surface(world_beaver_x(),lane)-PX(8);
+    world.beaver.vy=0;
+    world.meter=meter;
+    assert(!surf_flip_safe()); /* This short hop was previously refused. */
+    world_step(INPUT_JUMP,&e);
+    assert(world.beaver.flip==FLIP_FRAMES-1 && world.banner!=BANNER_LOW);
+    world_step(INPUT_JUMP,&e);
+    assert(world.beaver.flip==FLIP_FRAMES-2); /* Holding A does not restart it. */
+}
 int main(void) {
-    uint8_t i,n,other;
+    uint8_t i,n,other,lane,racing;
+    const int8_t meters[]={0,19,95}; /* 0%, 20%, end of the 96-pixel bar. */
     uint8_t encoded[STATE_LEN+2];
     memset(encoded,0xa5,sizeof encoded);world_new();world_encode(encoded+1);
     assert(encoded[0]==0xa5 && encoded[STATE_LEN+1]==0xa5 && STATE_LEN==126);
@@ -28,6 +49,12 @@ int main(void) {
     assert(!surf_flip_safe());
     play();world.beaver.airborne=1;world.beaver.y=PX(40);world.beaver.vy=-1024;
     world_step(INPUT_JUMP,&e);assert(world.beaver.flip>0);
+    for(racing=0;racing<2;racing++)for(lane=0;lane<2;lane++)for(i=0;i<3;i++)
+        low_flip(lane,racing,meters[i]);
+    /* Starting a low flip is allowed; landing before it finishes still fails. */
+    play();world.beaver.airborne=1;
+    world.beaver.y=sea_at(world_beaver_x())-PX(1);world.beaver.vy=PX(2);
+    world_step(INPUT_JUMP,&e);assert(e.wipeout && !world.beaver.flip);
     play();world.beaver.lane=world.beaver.lane_to=LANE_BOTTOM;
     world.beaver.y=front_at(world_beaver_x());
     world_step(INPUT_UP,&e);assert(!world.beaver.airborne && world.beaver.lane_to==LANE_BOTTOM);
@@ -56,6 +83,6 @@ int main(void) {
     assert(n==4 && pickups[1].x-pickups[0].x==PX(36));
     world.course_distance+=256UL*FP;surf_tick(0,0);
     for(i=4;i<8;i++)assert(pickups[i].flags&PICKUP_BOTTOM);
-    puts("Core: source-mask safety, touch/board pickups, counted collection, 12-tick pops, flip guard, explicit lane controls, gull penalty/immunity, four-ring balanced trails pass");
+    puts("Core: source-mask safety, touch/board pickups, counted collection, 12-tick pops, unrestricted player flips at 0/20/100% on both lanes in solo/race, risky landings, explicit lane controls, gull penalty/immunity, four-ring balanced trails pass");
     return 0;
 }

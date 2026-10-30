@@ -16,6 +16,7 @@ extern uint8_t surf_jump_buffer,surf_up_held,surf_down_held,surf_gull_shown;
 void surf_reset(void) BANKED;
 void surf_tick(int16_t step,uint8_t racing) BANKED;
 uint8_t surf_collect(const Beaver *rival,uint8_t player_input,uint8_t rival_input,uint8_t *rival_count) BANKED;
+/* Optional NPC planning forecast; player flip input does not require it. */
 uint8_t surf_flip_safe(void) BANKED;
 void surf_clear(void) BANKED;
 #endif
